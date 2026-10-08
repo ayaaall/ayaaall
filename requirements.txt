@@ -2,19 +2,20 @@
 fastapi
 uvicorn[standard]
 python-multipart          # requis par FastAPI pour File()/Form()
-pydantic
+pydantic>=2
  
 # ── Base de données ──────────────────────────────────────────────────────────
-sqlalchemy>=2.0
+sqlalchemy[asyncio]>=2.0   # [asyncio] ajoute greenlet, requis par le mode async
 aiosqlite                 # SQLite async (dev par défaut)
-asyncpg                 # décommenter si DATABASE_URL pointe vers Postgres
+asyncpg                   # PostgreSQL async (docker-compose)
  
 # ── Auth ─────────────────────────────────────────────────────────────────────
-pyjwt
-bcrypt
+pyjwt>=2.8
+bcrypt>=4
+python-dotenv           # chargement du .env
  
 # ── Traitement PDF / documents ──────────────────────────────────────────────
-pymupdf                   # fitz
+pymupdf>=1.24.3          # import pymupdf
 pandas
 python-docx
 openpyxl                  # requis par pandas pour écrire du .xlsx

@@ -3,7 +3,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ocr}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ocr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-ocr}
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -17,22 +17,27 @@ services:
     build:
       context: .
       args:
-        HTTP_PROXY: http://algpxy:8080
-        HTTPS_PROXY: http://algpxy:8080
-        NO_PROXY: localhost,127.0.0.1
+        # Corporate proxy, if any — set in .env (e.g. HTTP_PROXY=http://proxy:8080)
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
     depends_on:
       db:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"   # reach Ollama on the host
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ocr}:${POSTGRES_PASSWORD:-ocr}@db:5432/${POSTGRES_DB:-ocr}
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ocr}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ocr}
+      APP_ENV: ${APP_ENV:-production}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (>= 32 random chars)}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-1}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
       QWEN_VL_MODEL: ${QWEN_VL_MODEL:-Qwen/Qwen3.5-2B}
       # Qwen via the host's local Ollama (pull first: ollama pull qwen3.5:2b).
       # Empty OLLAMA_HOST disables the ollama engine.
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
       OLLAMA_VL_MODEL: ${OLLAMA_VL_MODEL:-qwen3.5:2b}
+      HOME: /tmp                       # read-only rootfs: libs that cache under ~ need a writable dir
       HF_TOKEN: ${HF_TOKEN:-}
       # Fully-local inference: never contact huggingface.co at runtime.
       # Prefetch weights once first:  docker compose run --rm app python scripts/prefetch_models.py
@@ -41,7 +46,15 @@ services:
       NO_PROXY: "host.docker.internal,localhost,127.0.0.1"
       no_proxy: "host.docker.internal,localhost,127.0.0.1"
     ports:
-      - "${APP_PORT:-8000}:8000"
+      # Loopback only: external traffic must go through nginx (TLS).
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       - ./app:/srv/app/app:ro          # live code, no rebuild needed
       - ./main.py:/srv/app/main.py:ro
@@ -56,6 +69,7 @@ services:
       - app
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/proxy_params.inc:/etc/nginx/conf.d/proxy_params.inc:ro
       - ./nginx/certs:/etc/nginx/certs:ro
     ports:
       - "8443:443"

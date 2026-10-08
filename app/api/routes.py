@@ -1,10 +1,11 @@
 """
 app/api/routes.py
 ──────────────────
-All API route handlers.
+Job, history and download route handlers.
 
 Routes are grouped into a single APIRouter so that `main.py` stays
 minimal — it just mounts this router onto the FastAPI application.
+All routes require a Bearer access token (see app/api/deps.py).
 """
 
 from __future__ import annotations
@@ -12,24 +13,22 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime
-from pathlib import Path
-from typing import List, Optional
+from typing import List
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile,
+)
 from fastapi.responses import FileResponse
 
-from app.core.config import MEDIA_TYPES, RESULTS_DIR, UPLOAD_DIR, ActionType
+from app.api.deps import get_current_user, get_owned_job
+from app.core.config import MEDIA_TYPES, ActionType
 from app.core.database import (
+    Job,
     User,
     count_jobs,
     delete_job,
-    get_job as db_get_job,
-    insert_job,
     list_jobs,
-    update_job,
 )
-from app.api.auth_routes import get_current_user
 from app.schemas.jobs import (
     CreateJobResponse,
     DeleteResponse,
@@ -40,20 +39,12 @@ from app.schemas.jobs import (
     OutputFile,
     SourceFile,
 )
-from app.services.job_runners import JOB_RUNNERS
+from app.services import storage
+from app.services.jobs import load_json_list as _load_json_list
+from app.services.jobs import prepare_job
 
 log = logging.getLogger(__name__)
 router = APIRouter()
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-def _parse_options(raw: str) -> dict:
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-
 
 # ── GET /api/engines ───────────────────────────────────────────────────────────
 
@@ -84,227 +75,114 @@ async def create_job(
 
     Multipart form fields
     ─────────────────────
-    files[]     — one or more uploaded files
+    files[]     — one or more uploaded files (PDF / images, size-capped)
     action_type — one of: ocr | pdf_to_png | png_to_pdf | split_pdf | merge_pdf
     options     — JSON string with action-specific parameters
     """
-    if action_type not in ActionType.ALL:
-        raise HTTPException(status_code=400, detail={
-            "error": "unsupported_action",
-            "message": f"'{action_type}' is not a supported action.",
-            "supported": list(ActionType.ALL),
-        })
-
-    n = len(files)
-
-    # ── File count validation ───────────────────────────────────────────────
-    if action_type in {ActionType.OCR, ActionType.PDF_TO_PNG, ActionType.SPLIT_PDF} and n != 1:
-        raise HTTPException(status_code=400, detail={
-            "error": "invalid_file_count",
-            "message": f"'{action_type}' requires exactly 1 file; received {n}.",
-        })
-    if action_type == ActionType.MERGE_PDF and n < 2:
-        raise HTTPException(status_code=400, detail={
-            "error": "invalid_file_count",
-            "message": f"'merge_pdf' requires at least 2 files; received {n}.",
-        })
-
-    opts       = _parse_options(options)
-    job_id     = f"job_{uuid.uuid4().hex[:8]}"
-    created_at = datetime.utcnow().isoformat() + "Z"
-
-    # ── Persist uploaded files ──────────────────────────────────────────────
-    saved_paths: List[str] = []
-    source_files: list = []
-    for upload in files:
-        ext  = upload.filename.rsplit(".", 1)[-1] if "." in upload.filename else "bin"
-        dest = UPLOAD_DIR / f"{job_id}_{uuid.uuid4().hex[:6]}.{ext}"
-        content = await upload.read()
-        dest.write_bytes(content)
-        saved_paths.append(str(dest))
-        source_files.append({
-            "filename": upload.filename,
-            "path": str(dest),
-            "size_bytes": len(content),
-        })
-
-    primary_filename = files[0].filename if files else "unknown"
-
-    # ── Insert job record ───────────────────────────────────────────────────
-    await insert_job(job_id, user.id, action_type, created_at,
-                     primary_filename, options, json.dumps(source_files))
-
-    # ── Dispatch background task ────────────────────────────────────────────
-    runner = JOB_RUNNERS[action_type]
-    background_tasks.add_task(runner, job_id, saved_paths, opts)
-
-    log.info("Job %s created  action=%s  files=%d", job_id, action_type, n)
-
-    return CreateJobResponse(
-        job_id=job_id,
-        status="pending",
-        action_type=action_type,
-        file_count=n,
-        submitted_at=created_at,
-    )
+    job = await prepare_job(files, action_type, options, user)
+    background_tasks.add_task(job.runner, job.job_id, job.paths, job.options)
+    return job.response
 
 
 # ── GET /api/jobs/{job_id} ─────────────────────────────────────────────────────
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
-async def get_job(job_id: str, user: User = Depends(get_current_user)):
+async def get_job(job: Job = Depends(get_owned_job)):
     """Poll the status and progress of a job."""
-    job = await db_get_job(job_id)
-
-    if job is None or job.user_id != user.id:
-        raise HTTPException(status_code=404, detail="Job not found.")
-
-    resp = JobStatusResponse(job_id=job_id, status=job.status)
+    resp = JobStatusResponse(job_id=job.id, status=job.status)
 
     if job.status in {"pending", "processing"}:
         resp.progress = job.progress
 
     if job.status == "complete":
         resp.action_type = job.action_type
-        try:
-            resp.outputs = [OutputFile(**o) for o in json.loads(job.outputs)]
-        except Exception:
-            resp.outputs = []
+        resp.outputs = [OutputFile(**o) for o in _load_json_list(job.outputs)]
         if job.action_type == ActionType.OCR and job.preview_text:
             resp.preview_text = job.preview_text
 
-    # Original uploaded documents (for history re-download)
-    try:
-        src_list = json.loads(job.source_files or "[]")
-    except Exception:
-        src_list = []
     resp.sources = [
         SourceFile(filename=s.get("filename", "?"), size_bytes=s.get("size_bytes", 0))
-        for s in src_list
+        for s in _load_json_list(job.source_files)
     ]
-
     return resp
 
 
 # ── GET /api/jobs/{job_id}/output ──────────────────────────────────────────────
 
 @router.get("/jobs/{job_id}/output")
-async def get_job_output(job_id: str, output_id: str, request: Request,
-                         token: Optional[str] = None):
-    """Stream a specific output file for download.
-
-    Auth: Bearer header (API clients) or `?token=` query param (browser
-    download links, which cannot set headers).
-    """
-    from app.core.database import get_user_by_id
-    from app.core.security import decode_access_token
-
-    uid = decode_access_token(token) if token else None
-    if uid is None:
-        auth = request.headers.get("authorization", "")
-        if auth.lower().startswith("bearer "):
-            uid = decode_access_token(auth[7:])
-    user = await get_user_by_id(uid) if uid else None
-    if user is None:
-        raise HTTPException(status_code=401, detail="Authentication required.")
-
-    job = await db_get_job(job_id)
-
-    if job is None or job.user_id != user.id:
-        raise HTTPException(status_code=404, detail="Job not found.")
-
-    outputs = json.loads(job.outputs)
-    match   = next((o for o in outputs if o.get("output_id") == output_id), None)
-
+async def get_job_output(output_id: str, job: Job = Depends(get_owned_job)):
+    """Stream a specific output file (Bearer auth only — tokens never go in URLs)."""
+    match = next((o for o in _load_json_list(job.outputs) if o.get("output_id") == output_id), None)
     if not match:
         raise HTTPException(status_code=404, detail="Output ID not found.")
 
     fmt  = match["format"]
-    path = RESULTS_DIR / job_id / f"{output_id}.{fmt}"
-
-    if not path.exists():
+    path = storage.result_file(job.id, output_id, fmt)
+    if path is None or not path.is_file():
         raise HTTPException(status_code=404, detail="File deleted or unavailable.")
 
-    media_type = MEDIA_TYPES.get(fmt, "application/octet-stream")
-    return FileResponse(str(path), media_type=media_type, filename=f"{output_id}.{fmt}")
+    return FileResponse(path, media_type=MEDIA_TYPES.get(fmt, "application/octet-stream"),
+                        filename=f"{output_id}.{fmt}")
 
 
 # ── GET /api/jobs/{job_id}/source ──────────────────────────────────────────────
 
 @router.get("/jobs/{job_id}/source")
-async def get_job_source(job_id: str, request: Request, file: int = 0,
-                         token: Optional[str] = None):
-    """Re-download the original uploaded document for a job (history).
-
-    Auth: Bearer header or `?token=` query param (browser links).
-    """
-    from app.core.database import get_user_by_id
-    from app.core.security import decode_access_token
-
-    uid = decode_access_token(token) if token else None
-    if uid is None:
-        auth = request.headers.get("authorization", "")
-        if auth.lower().startswith("bearer "):
-            uid = decode_access_token(auth[7:])
-    user = await get_user_by_id(uid) if uid else None
-    if user is None:
-        raise HTTPException(status_code=401, detail="Authentication required.")
-
-    job = await db_get_job(job_id)
-    if job is None or job.user_id != user.id:
-        raise HTTPException(status_code=404, detail="Job not found.")
-
-    try:
-        sources = json.loads(job.source_files or "[]")
-    except Exception:
-        sources = []
+async def get_job_source(file: int = Query(0, ge=0), job: Job = Depends(get_owned_job)):
+    """Re-download the original uploaded document for a job (history)."""
+    sources = _load_json_list(job.source_files)
     if not sources:
         raise HTTPException(status_code=404, detail="No source file stored for this job.")
-    entry = sources[min(max(file, 0), len(sources) - 1)]
+    entry = sources[min(file, len(sources) - 1)]
 
-    path = Path(entry["path"])
-    if not path.exists():
+    path = storage.source_file(entry.get("path", ""))
+    if path is None or not path.is_file():
         raise HTTPException(status_code=404, detail="Source file deleted or unavailable.")
-    return FileResponse(str(path), filename=entry.get("filename") or path.name)
+    return FileResponse(path, filename=entry.get("filename") or path.name,
+                        media_type="application/octet-stream")
 
 
 # ── GET /api/history ───────────────────────────────────────────────────────────
 
 @router.get("/history", response_model=HistoryResponse)
-async def get_history(page: int = 1, limit: int = 20,
+async def get_history(page: int = Query(1, ge=1), limit: int = Query(20, ge=1, le=100),
                       user: User = Depends(get_current_user)):
     """Return the current user's paginated job history, most recent first."""
-    offset = (page - 1) * limit
-    total  = await count_jobs(user.id)
-    rows   = await list_jobs(user.id, limit, offset)
+    total = await count_jobs(user.id)
+    rows  = await list_jobs(user.id, limit, (page - 1) * limit)
 
-    items = []
-    for row in rows:
-        try:
-            formats = [o.get("format") for o in json.loads(row.outputs)]
-        except Exception:
-            formats = []
-        items.append(HistoryItem(
+    items = [
+        HistoryItem(
             job_id=row.id, filename=row.primary_filename, action_type=row.action_type,
-            status=row.status, created_at=row.created_at, outputs=formats,
-        ))
-
+            status=row.status, created_at=row.created_at,
+            outputs=[o.get("format") for o in _load_json_list(row.outputs)],
+        )
+        for row in rows
+    ]
     return HistoryResponse(page=page, limit=limit, total=total, items=items)
 
 
 # ── DELETE /api/history/{job_id} ───────────────────────────────────────────────
 
 @router.delete("/history/{job_id}", response_model=DeleteResponse)
-async def delete_history(job_id: str, user: User = Depends(get_current_user)):
-    """Permanently remove one of the current user's job records."""
-    await delete_job(job_id, user_id=user.id)
-    return DeleteResponse(job_id=job_id, deleted=True)
+async def delete_history(job: Job = Depends(get_owned_job), user: User = Depends(get_current_user)):
+    """Permanently remove one of the current user's jobs and its files on disk."""
+    sources = [s.get("path", "") for s in _load_json_list(job.source_files)]
+    deleted = await delete_job(job.id, user_id=user.id)
+    if deleted:
+        storage.delete_job_files(job.id, sources)
+    return DeleteResponse(job_id=job.id, deleted=deleted)
 
 
 # ── POST /api/files/metadata ───────────────────────────────────────────────────
 
 @router.post("/files/metadata", response_model=FileMetadataResponse)
-async def register_metadata(request: Request):
-    """Register file metadata (spec compliance endpoint)."""
-    await request.json()   # consume the body
+async def register_metadata(request: Request, user: User = Depends(get_current_user)):
+    """Register file metadata (spec compliance endpoint; body is validated, not stored)."""
+    if int(request.headers.get("content-length") or 0) > 10_000:
+        raise HTTPException(status_code=413, detail="Payload too large.")
+    try:
+        await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Body must be valid JSON.")
     return FileMetadataResponse(file_id=f"file_{uuid.uuid4().hex[:8]}", stored=True)
