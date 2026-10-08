@@ -230,3 +230,106 @@ def test_ocr_pdf_job_with_stub_engine(client, auth, monkeypatch):
     assert st["status"] == "complete"
     assert {o["format"] for o in st["outputs"]} >= {"txt", "md", "docx"}
     assert "hello" in st["preview_text"]
+
+
+# ── API keys / public v1 API ───────────────────────────────────────────────────
+
+def _make_key(client, headers, name="proj"):
+    r = client.post("/api/keys", headers=headers, json={"name": name})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_api_key_lifecycle(client, auth):
+    headers, _ = auth
+    created = _make_key(client, headers)
+    key = created["api_key"]
+    assert key.startswith("ocr_") and created["prefix"] == key[:12]
+
+    # works via both header styles, on regular endpoints too
+    assert client.get("/api/history", headers={"X-API-Key": key}).status_code == 200
+    assert client.get("/api/history", headers={"Authorization": f"Bearer {key}"}).status_code == 200
+
+    listed = client.get("/api/keys", headers=headers).json()
+    assert [k["id"] for k in listed] == [created["id"]]
+    assert "api_key" not in listed[0] and listed[0]["last_used_at"]
+
+    assert client.delete(f"/api/keys/{created['id']}", headers=headers).status_code == 200
+    assert client.get("/api/history", headers={"X-API-Key": key}).status_code == 401
+    assert client.delete(f"/api/keys/{created['id']}", headers=headers).status_code == 404
+
+
+def test_api_key_stored_hashed_and_cannot_manage_keys(client, auth):
+    import asyncio
+    from sqlalchemy import select
+    from app.core.database import ApiKey, SessionLocal
+
+    headers, _ = auth
+    key = _make_key(client, headers)["api_key"]
+
+    async def stored():
+        async with SessionLocal() as db:
+            return list((await db.execute(select(ApiKey.key_hash))).scalars())
+
+    assert key not in asyncio.run(stored())
+    assert client.post("/api/keys", headers={"X-API-Key": key}, json={"name": "x"}).status_code == 403
+    assert client.get("/api/keys", headers={"Authorization": f"Bearer {key}"}).status_code == 403
+
+
+def test_invalid_api_key_rejected(client):
+    assert client.get("/api/history", headers={"X-API-Key": "ocr_nope"}).status_code == 401
+    assert client.get("/api/history", headers={"Authorization": "Bearer ocr_nope"}).status_code == 401
+
+
+def test_keys_are_per_user(client, auth):
+    headers, _ = auth
+    created = _make_key(client, headers)
+    other = client.post("/api/auth/register", json={"identifiant": "other-owner", "password": "correct-horse-1"}).json()
+    h2 = {"Authorization": f"Bearer {other['access_token']}"}
+    assert client.get("/api/keys", headers=h2).json() == []
+    assert client.delete(f"/api/keys/{created['id']}", headers=h2).status_code == 404
+
+
+def test_key_limit(client, auth):
+    headers, _ = auth
+    for i in range(10):
+        _make_key(client, headers, f"k{i}")
+    assert client.post("/api/keys", headers=headers, json={"name": "one-too-many"}).status_code == 409
+
+
+def test_v1_ocr_sync_with_api_key(client, auth, monkeypatch):
+    import app.services.job_runners as jr
+
+    monkeypatch.setattr(jr, "extract_text", lambda path, model: "invoice 42")
+    headers, _ = auth
+    key = _make_key(client, headers)["api_key"]
+
+    r = client.post("/api/v1/ocr?wait=30", headers={"X-API-Key": key},
+                    files={"file": ("scan.pdf", io.BytesIO(make_pdf(1)), "application/pdf")})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "complete" and "invoice 42" in body["text"] and "invoice 42" in body["markdown"]
+
+    again = client.get(f"/api/v1/ocr/{body['job_id']}", headers={"X-API-Key": key}).json()
+    assert again["text"] == body["text"]
+
+
+def test_v1_ocr_async_then_poll(client, auth):
+    headers, _ = auth
+    r = client.post("/api/v1/ocr", headers=headers,
+                    files={"file": ("scan.pdf", io.BytesIO(make_pdf(1)), "application/pdf")})
+    assert r.status_code == 200 and r.json()["text"] is None
+    assert _wait_done(client, headers, r.json()["job_id"])["status"] in {"complete", "error"}
+
+
+def test_v1_ocr_validation(client, auth):
+    headers, _ = auth
+    bad = client.post("/api/v1/ocr?wait=9999", headers=headers,
+                      files={"file": ("a.pdf", io.BytesIO(make_pdf(1)), "application/pdf")})
+    assert bad.status_code == 422
+    junk = client.post("/api/v1/ocr", headers=headers, files={"file": ("a.pdf", io.BytesIO(b"junk"), "application/pdf")})
+    assert junk.status_code == 415
+    engine = client.post("/api/v1/ocr", headers=headers, data={"ocr_model": "nope"},
+                         files={"file": ("a.pdf", io.BytesIO(make_pdf(1)), "application/pdf")})
+    assert engine.status_code == 400
+    assert client.post("/api/v1/ocr", files={"file": ("a.pdf", io.BytesIO(make_pdf(1)), "application/pdf")}).status_code == 401

@@ -40,7 +40,7 @@ def auth(client):
 
 
 def make_pdf(pages: int = 3) -> bytes:
-    import fitz
+    import pymupdf as fitz
 
     doc = fitz.open()
     for i in range(pages):

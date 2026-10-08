@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
 from typing import List
 
 from fastapi import (
@@ -22,13 +21,12 @@ from fastapi import (
 from fastapi.responses import FileResponse
 
 from app.api.deps import get_current_user, get_owned_job
-from app.core.config import MAX_FILES_PER_JOB, MEDIA_TYPES, ActionType
+from app.core.config import MEDIA_TYPES, ActionType
 from app.core.database import (
     Job,
     User,
     count_jobs,
     delete_job,
-    insert_job,
     list_jobs,
 )
 from app.schemas.jobs import (
@@ -42,49 +40,11 @@ from app.schemas.jobs import (
     SourceFile,
 )
 from app.services import storage
-from app.services.job_runners import JOB_RUNNERS
-from app.services.options import validate_options
+from app.services.jobs import load_json_list as _load_json_list
+from app.services.jobs import prepare_job
 
 log = logging.getLogger(__name__)
 router = APIRouter()
-
-# Which uploaded content kinds each action accepts.
-_ACCEPTS = {
-    ActionType.OCR:        {"pdf", "image"},
-    ActionType.PDF_TO_PNG: {"pdf"},
-    ActionType.SPLIT_PDF:  {"pdf"},
-    ActionType.MERGE_PDF:  {"pdf"},
-    ActionType.PNG_TO_PDF: {"image"},
-}
-_SINGLE_FILE_ACTIONS = {ActionType.OCR, ActionType.PDF_TO_PNG, ActionType.SPLIT_PDF}
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-def _load_json_list(raw: str | None) -> list:
-    try:
-        data = json.loads(raw or "[]")
-    except (json.JSONDecodeError, TypeError):
-        return []
-    return data if isinstance(data, list) else []
-
-
-def _bad_request(error: str, message: str, **extra) -> HTTPException:
-    return HTTPException(status_code=400, detail={"error": error, "message": message, **extra})
-
-
-def _check_file_count(action_type: str, n: int) -> None:
-    if n > MAX_FILES_PER_JOB:
-        raise _bad_request("too_many_files", f"At most {MAX_FILES_PER_JOB} files per job; received {n}.")
-    if action_type in _SINGLE_FILE_ACTIONS and n != 1:
-        raise _bad_request("invalid_file_count",
-                           f"'{action_type}' requires exactly 1 file; received {n}.")
-    if action_type == ActionType.MERGE_PDF and n < 2:
-        raise _bad_request("invalid_file_count",
-                           f"'merge_pdf' requires at least 2 files; received {n}.")
-    if action_type == ActionType.PNG_TO_PDF and n < 1:
-        raise _bad_request("invalid_file_count", "'png_to_pdf' requires at least 1 file.")
-
 
 # ── GET /api/engines ───────────────────────────────────────────────────────────
 
@@ -119,49 +79,9 @@ async def create_job(
     action_type — one of: ocr | pdf_to_png | png_to_pdf | split_pdf | merge_pdf
     options     — JSON string with action-specific parameters
     """
-    if action_type not in ActionType.ALL:
-        raise _bad_request("unsupported_action",
-                           f"'{action_type}' is not a supported action.",
-                           supported=sorted(ActionType.ALL))
-
-    n = len(files)
-    _check_file_count(action_type, n)
-    opts = validate_options(action_type, options, n)
-
-    job_id     = f"job_{uuid.uuid4().hex[:16]}"
-    created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-    # ── Persist uploaded files (all-or-nothing) ─────────────────────────────
-    stored: list[storage.StoredUpload] = []
-    try:
-        for upload in files:
-            item = await storage.save_upload(upload, job_id)
-            stored.append(item)
-            if item.kind not in _ACCEPTS[action_type]:
-                raise _bad_request(
-                    "invalid_file_type",
-                    f"'{item.filename}' is not accepted by '{action_type}' "
-                    f"(expected: {', '.join(sorted(_ACCEPTS[action_type]))}).")
-    except BaseException:
-        for item in stored:
-            item.path.unlink(missing_ok=True)
-        raise
-
-    source_files = [
-        {"filename": s.filename, "path": str(s.path), "size_bytes": s.size_bytes}
-        for s in stored
-    ]
-
-    await insert_job(job_id, user.id, action_type, created_at,
-                     stored[0].filename, json.dumps(opts), json.dumps(source_files))
-
-    background_tasks.add_task(JOB_RUNNERS[action_type], job_id, [str(s.path) for s in stored], opts)
-    log.info("Job %s created  user=%s  action=%s  files=%d", job_id, user.id, action_type, n)
-
-    return CreateJobResponse(
-        job_id=job_id, status="pending", action_type=action_type,
-        file_count=n, submitted_at=created_at,
-    )
+    job = await prepare_job(files, action_type, options, user)
+    background_tasks.add_task(job.runner, job.job_id, job.paths, job.options)
+    return job.response
 
 
 # ── GET /api/jobs/{job_id} ─────────────────────────────────────────────────────

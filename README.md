@@ -184,3 +184,7 @@ MIT – feel free to use, modify, and distribute.
 pip install -r requirements-dev.txt
 pytest
 ```
+
+## Using the API from another project
+
+API keys (`POST /api/keys`), a one-call OCR endpoint (`POST /api/v1/ocr?wait=60`) and a copy-paste Python client are available — see [API.md](API.md) and `client/ocr_client.py`.

@@ -15,7 +15,7 @@ bcrypt>=4
 python-dotenv           # chargement du .env
  
 # ── Traitement PDF / documents ──────────────────────────────────────────────
-pymupdf                   # fitz
+pymupdf>=1.24.3          # import pymupdf
 pandas
 python-docx
 openpyxl                  # requis par pandas pour écrire du .xlsx

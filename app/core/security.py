@@ -93,6 +93,21 @@ def hash_refresh_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+# ── API keys ───────────────────────────────────────────────────────────────────
+
+API_KEY_PREFIX = "ocr_"
+
+
+def new_api_key() -> str:
+    """Return a new random API key (shown to the user exactly once)."""
+    return API_KEY_PREFIX + secrets.token_urlsafe(32)
+
+
+def hash_api_key(key: str) -> str:
+    """Keys are high-entropy random strings, so a fast digest is sufficient."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
 # ── Login throttle ─────────────────────────────────────────────────────────────
 
 class LoginThrottle:

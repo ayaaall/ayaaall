@@ -21,7 +21,7 @@ import logging
 from pathlib import Path
 from typing import Awaitable, Callable, List
 
-import fitz         # PyMuPDF
+import pymupdf as fitz   # PyMuPDF (>= 1.24.3)
 import pandas as pd
 from docx import Document
 

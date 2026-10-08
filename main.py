@@ -15,7 +15,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.api.auth_routes import router as auth_router
+from app.api.key_routes import router as key_router
 from app.api.routes import router
+from app.api.v1_routes import router as v1_router
 from app.core.config import (
     API_DESCRIPTION,
     API_TITLE,
@@ -97,6 +99,8 @@ async def security_headers(request: Request, call_next):
 
 # ── API routes ─────────────────────────────────────────────────────────────────
 app.include_router(auth_router, prefix="/api")
+app.include_router(key_router, prefix="/api")
+app.include_router(v1_router, prefix="/api")
 app.include_router(router, prefix="/api")
 
 
