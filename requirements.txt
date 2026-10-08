@@ -1,0 +1,34 @@
+# ── Socle API (obligatoire) ─────────────────────────────────────────────────
+fastapi
+uvicorn[standard]
+python-multipart          # requis par FastAPI pour File()/Form()
+pydantic
+ 
+# ── Base de données ──────────────────────────────────────────────────────────
+sqlalchemy>=2.0
+aiosqlite                 # SQLite async (dev par défaut)
+asyncpg                 # décommenter si DATABASE_URL pointe vers Postgres
+ 
+# ── Auth ─────────────────────────────────────────────────────────────────────
+pyjwt
+bcrypt
+ 
+# ── Traitement PDF / documents ──────────────────────────────────────────────
+pymupdf                   # fitz
+pandas
+python-docx
+openpyxl                  # requis par pandas pour écrire du .xlsx
+httpx
+ 
+# ── Moteurs OCR (installer seulement ceux que tu utilises) ──────────────────
+rapidocr-onnxruntime      # moteur par défaut, léger, CPU-only
+# easyocr                 # requiert torch
+# surya-ocr               # requiert torch
+# python-doctr            # requiert torch
+# keras-ocr               # requiert tensorflow
+# docling                 # parsing PDF natif (~1 Go de modèles)
+# marker-pdf              # parsing PDF natif → markdown
+ 
+# ── Moteur qwen35_vl (VLM, lourd — nécessite un GPU pour être rapide) ───────
+# torch
+# transformers

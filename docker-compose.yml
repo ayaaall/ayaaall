@@ -1,0 +1,67 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ocr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ocr}
+      POSTGRES_DB: ${POSTGRES_DB:-ocr}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ocr} -d ${POSTGRES_DB:-ocr}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      args:
+        HTTP_PROXY: http://algpxy:8080
+        HTTPS_PROXY: http://algpxy:8080
+        NO_PROXY: localhost,127.0.0.1
+    depends_on:
+      db:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach Ollama on the host
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ocr}:${POSTGRES_PASSWORD:-ocr}@db:5432/${POSTGRES_DB:-ocr}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      QWEN_VL_MODEL: ${QWEN_VL_MODEL:-Qwen/Qwen3.5-2B}
+      # Qwen via the host's local Ollama (pull first: ollama pull qwen3.5:2b).
+      # Empty OLLAMA_HOST disables the ollama engine.
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      OLLAMA_VL_MODEL: ${OLLAMA_VL_MODEL:-qwen3.5:2b}
+      HF_TOKEN: ${HF_TOKEN:-}
+      # Fully-local inference: never contact huggingface.co at runtime.
+      # Prefetch weights once first:  docker compose run --rm app python scripts/prefetch_models.py
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      NO_PROXY: "host.docker.internal,localhost,127.0.0.1"
+      no_proxy: "host.docker.internal,localhost,127.0.0.1"
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - ./app:/srv/app/app:ro          # live code, no rebuild needed
+      - ./main.py:/srv/app/main.py:ro
+      - ./index.html:/srv/app/index.html:ro
+      - uploads:/srv/app/uploads
+      - results:/srv/app/results
+      - hf_cache:/models/hf_cache
+
+  nginx:
+    image: nginx:alpine
+    depends_on:
+      - app
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    ports:
+      - "8443:443"
+
+volumes:
+  pgdata:
+  uploads:
+  results:
+  hf_cache:

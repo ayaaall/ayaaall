@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OCR Holding — Numérisation &amp; OCR</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#faf9f5;
+    --panel:#ffffff;
+    --panel-raised:#f5f4ee;
+    --rule:#e6e3d8;
+    --text:#2d2a26;
+    --text-soft:#6b6558;
+    --text-faint:#a39c8c;
+    --brass:#2f6690;
+    --brass-deep:#1f4d70;
+    --brass-soft:rgba(47,102,144,0.08);
+    --teal:#4f8f68;
+    --teal-dark:#3c6d50;
+    --teal-soft:rgba(79,143,104,0.12);
+    --amber:#c98a2e;
+    --amber-soft:rgba(201,138,46,0.12);
+    --danger:#b23b3b;
+    --radius:5px;
+    --mono:'IBM Plex Mono', monospace;
+    --slab:'Fraunces', serif;
+    --sans:'Public Sans', system-ui, sans-serif;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%; background:var(--ink); color:var(--text); font-family:var(--sans);}
+  a{color:inherit; text-decoration:none;}
+  ::selection{ background:var(--brass-soft); color:var(--text); }
+ 
+  .panel{
+    background:var(--panel-raised);
+    border:1px solid var(--rule);
+    border-radius:var(--radius);
+  }
+ 
+  #view-landing{ display:flex; flex-direction:column; align-items:center; min-height:100vh; padding:0 24px 72px; }
+ 
+  .hero{
+    width:100%; max-width:760px; padding:72px 0 56px; text-align:center;
+    border-bottom:1px solid var(--rule); margin-bottom:52px;
+    animation:fadeInUp 0.6s ease both;
+  }
+  .brand{ display:flex; align-items:center; justify-content:center; gap:11px; margin-bottom:28px; }
+  .brand-mark{
+    width:34px; height:34px; border-radius:3px; background:var(--brass);
+    display:flex; align-items:center; justify-content:center; flex-shrink:0;
+  }
+  .brand-mark svg{ width:17px; height:17px; }
+  .brand-name{ font-family:var(--slab); font-size:16px; font-weight:600; letter-spacing:0.01em; color:var(--text-soft); }
+ 
+  .hero h1{ font-family:var(--slab); font-weight:600; font-size:clamp(32px,5vw,48px); line-height:1.15; letter-spacing:-0.01em; margin-bottom:18px; }
+  .hero p{ font-size:15px; color:var(--text-soft); max-width:480px; margin:0 auto; line-height:1.65; }
+  .hero p strong{ color:var(--brass); font-weight:600; }
+ 
+  .index-row{ display:flex; flex-wrap:wrap; justify-content:center; gap:16px; width:100%; max-width:920px; }
+ 
+  .tool-tab{
+    position:relative; width:158px; padding:26px 18px 20px;
+    background:var(--panel); border:1px solid var(--rule); border-top:2px solid var(--rule);
+    border-radius:3px 3px 8px 8px;
+    cursor:pointer; text-align:center;
+    transition:border-top-color 0.18s ease, transform 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+    animation:fadeInUp 0.6s ease both;
+  }
+  .index-row .tool-tab:nth-child(1){ animation-delay:0.05s; }
+  .index-row .tool-tab:nth-child(2){ animation-delay:0.12s; }
+  .index-row .tool-tab:nth-child(3){ animation-delay:0.19s; }
+  .index-row .tool-tab:nth-child(4){ animation-delay:0.26s; }
+  .index-row .tool-tab:nth-child(5){ animation-delay:0.33s; }
+  .tool-tab:hover{ border-top-color:var(--brass); transform:translateY(-4px); background:var(--panel-raised); box-shadow:0 10px 26px rgba(0,0,0,0.35); }
+  .tool-tab:hover .tool-glyph{ background:var(--brass); color:var(--ink); transform:scale(1.08); }
+  .tool-glyph{ transition:background 0.18s ease, color 0.18s ease, transform 0.18s ease; }
+ 
+  @keyframes fadeInUp{
+    from{ opacity:0; transform:translateY(14px); }
+    to{ opacity:1; transform:translateY(0); }
+  }
+  .tool-glyph{
+    width:38px; height:38px; margin:0 auto 14px; border-radius:50%;
+    background:var(--brass-soft); color:var(--brass);
+    display:flex; align-items:center; justify-content:center;
+  }
+  .tool-glyph svg{ width:18px; height:18px; }
+  .tool-tab-title{ font-family:var(--slab); font-weight:600; font-size:14.5px; margin-bottom:5px; }
+  .tool-tab-sub{ font-size:11.5px; color:var(--text-faint); line-height:1.4; }
+ 
+  #view-tool{ display:none; height:100vh; grid-template-columns:248px 1fr; }
+  #view-tool.active{ display:grid; }
+ 
+  .sidebar{ background:var(--panel); border-right:1px solid var(--rule); display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+  .sidebar-head{ padding:20px 18px 16px; border-bottom:1px solid var(--rule); display:flex; align-items:center; gap:10px; cursor:pointer; }
+  .sidebar-head .brand-mark{ width:26px; height:26px; }
+  .sidebar-head .brand-name{ font-size:14.5px; color:var(--text); }
+ 
+  .side-actions{ padding:16px 10px; display:flex; flex-direction:column; gap:3px; border-bottom:1px solid var(--rule); }
+  .side-label{ font-size:10.5px; color:var(--text-faint); padding:2px 10px 8px; }
+  .side-item{
+    position:relative;
+    display:flex; align-items:center; gap:10px; padding:9px 10px 9px 14px; border-radius:4px;
+    font-size:13px; color:var(--text-soft); cursor:pointer; transition:background 0.14s, color 0.14s, padding-left 0.14s;
+  }
+  .side-item svg{ width:14px; height:14px; opacity:0.65; flex-shrink:0; }
+  .side-item:hover{ background:var(--panel-raised); color:var(--text); padding-left:17px; }
+  .side-item.active{ background:var(--brass-soft); color:var(--brass); font-weight:600; }
+  .side-item.active svg{ opacity:1; }
+  .side-item.active::before{
+    content:''; position:absolute; left:0; top:6px; bottom:6px; width:2px; background:var(--brass); border-radius:2px;
+  }
+ 
+  .hist-label{ font-size:10.5px; color:var(--text-faint); padding:14px 10px 6px 18px; }
+  .history-list{ flex:1; overflow-y:auto; padding:0 10px 10px; }
+  .hist-item{ padding:9px 10px; border-radius:4px; margin-bottom:1px; border-left:2px solid transparent; display:flex; align-items:center; gap:8px; }
+  .hist-item:hover{ background:var(--panel-raised); border-left-color:var(--rule); }
+  .hist-item-main{ flex:1; min-width:0; }
+  .hist-name{ font-size:12px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--text); }
+  .hist-meta{ font-family:var(--mono); font-size:10px; color:var(--text-faint); margin-top:3px; display:flex; gap:6px; align-items:center; }
+  .hist-dot{ width:5px; height:5px; border-radius:50%; background:var(--teal); flex-shrink:0; }
+  .hist-delete{
+    flex-shrink:0; width:20px; height:20px; border:none; background:none; border-radius:4px;
+    color:var(--text-faint); cursor:pointer; opacity:0; transition:opacity 0.14s, background 0.14s, color 0.14s;
+    display:flex; align-items:center; justify-content:center; font-size:13px;
+  }
+  .hist-item:hover .hist-delete{ opacity:1; }
+  .hist-delete:hover{ background:var(--danger); color:#fff; }
+  .hist-empty{ font-size:12px; color:var(--text-faint); padding:8px 10px; }
+ 
+  .user-box{ padding:14px 16px; border-top:1px solid var(--rule); display:flex; align-items:center; gap:10px; }
+  .user-avatar{ width:27px; height:27px; border-radius:50%; background:var(--brass-soft); color:var(--brass); display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; flex-shrink:0; }
+  .user-name{ flex:1; font-size:12.5px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .user-logout{ background:none; border:none; color:var(--text-faint); cursor:pointer; font-size:11.5px; padding:4px; }
+  .user-logout:hover{ color:var(--danger); }
+ 
+  .main{ display:flex; flex-direction:column; height:100vh; overflow-y:auto; }
+  .topbar{
+    padding:22px 36px; border-bottom:1px solid var(--rule); background:var(--panel);
+    display:flex; align-items:center; justify-content:space-between; flex-shrink:0;
+  }
+  .topbar-title{ font-family:var(--slab); font-size:20px; font-weight:600; }
+  .topbar-sub{ font-size:12px; color:var(--text-faint); margin-top:4px; }
+  .status-chip{ font-family:var(--mono); font-size:10.5px; padding:5px 12px; border-radius:100px; background:var(--panel-raised); border:1px solid var(--rule); color:var(--text-soft); }
+ 
+  .workspace{ flex:1; padding:36px; max-width:900px; width:100%; margin:0 auto; }
+ 
+  .options-row{ margin-bottom:20px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .options-row label{ font-size:13px; font-weight:500; color:var(--text-soft); }
+  .options-row select, .options-row input[type="text"], .options-row input[type="number"]{
+    padding:8px 12px; border-radius:4px; border:1px solid var(--rule); background:var(--panel);
+    font-family:var(--sans); font-size:13px; color:var(--text); outline:none;
+  }
+  .options-row select:focus, .options-row input:focus{ border-color:var(--brass); }
+  .options-note{ font-size:12px; color:var(--text-faint); }
+ 
+  .dropzone{
+    position:relative; border:1px solid var(--rule); border-radius:6px; background:var(--panel);
+    padding:52px 24px; text-align:center; cursor:pointer; transition:border-color 0.18s, background 0.18s;
+  }
+  .dropzone .corner-tr, .dropzone .corner-bl,
+  .dropzone .corner-tl, .dropzone .corner-br{
+    content:''; position:absolute; width:18px; height:18px; transition:border-color 0.18s;
+  }
+  .dropzone .corner-tl{ top:10px; left:10px; border-top:2px solid var(--rule); border-left:2px solid var(--rule); }
+  .dropzone .corner-br{ bottom:10px; right:10px; border-bottom:2px solid var(--rule); border-right:2px solid var(--rule); }
+  .dropzone .corner-tr{ top:10px; right:10px; border-top:2px solid var(--rule); border-right:2px solid var(--rule); }
+  .dropzone .corner-bl{ bottom:10px; left:10px; border-bottom:2px solid var(--rule); border-left:2px solid var(--rule); }
+  .dropzone:hover{ background:var(--panel-raised); }
+  .dropzone:hover .corner-tl, .dropzone:hover .corner-br, .dropzone:hover .corner-tr, .dropzone:hover .corner-bl{ border-color:var(--brass); }
+  .drop-icon{ width:30px; height:30px; margin:0 auto 14px; color:var(--text-faint); }
+  .drop-text{ font-size:14px; color:var(--text-soft); }
+  .drop-text strong{ color:var(--brass); font-weight:600; }
+  .drop-formats{ margin-top:8px; font-family:var(--mono); font-size:10.5px; color:var(--text-faint); }
+ 
+  .file-row{
+    display:none; flex-direction:column; align-items:stretch; gap:8px; padding:16px 18px; margin-top:18px; margin-bottom:18px;
+  }
+  .file-row.visible{ display:flex; }
+  .file-row-head{ display:flex; justify-content:space-between; align-items:center; }
+  .file-name-display{ font-weight:600; font-size:13px; }
+  .file-remove{ background:none; border:1px solid var(--rule); border-radius:4px; color:var(--text-faint); cursor:pointer; font-size:12px; padding:4px 8px; }
+  .file-remove:hover{ color:var(--text); border-color:var(--text-faint); }
+  .file-list-display{ font-size:12px; color:var(--text-soft); max-height:100px; overflow-y:auto; line-height:1.7; }
+ 
+  .run-btn{
+    display:none; align-items:center; gap:9px; margin:0 0 24px; padding:12px 24px;
+    background:var(--brass); color:var(--ink); border:none; border-radius:4px; font-family:var(--sans);
+    font-size:13.5px; font-weight:600; cursor:pointer; transition:background 0.16s, transform 0.12s;
+  }
+  .run-btn.visible{ display:inline-flex; }
+  .run-btn:hover{ background:#dbaf6d; transform:translateY(-1px); }
+  .run-btn:active{ transform:translateY(0); }
+  .run-btn:disabled{ opacity:0.45; cursor:not-allowed; transform:none; }
+ 
+  .progress-wrap{ display:none; margin-bottom:28px; }
+  .progress-wrap.visible{ display:block; }
+  .progress-label{ display:flex; justify-content:space-between; font-family:var(--mono); font-size:11px; color:var(--text-soft); margin-bottom:8px; }
+  .progress-track{ height:3px; border-radius:100px; background:var(--rule); overflow:hidden; position:relative; }
+  .progress-fill{ height:100%; width:0%; background:linear-gradient(90deg, var(--brass-deep), var(--brass)); border-radius:100px; transition:width 0.3s linear; position:relative; }
+  .progress-fill::after{
+    content:''; position:absolute; top:0; right:0; bottom:0; width:24px;
+    background:linear-gradient(90deg, transparent, rgba(238,241,244,0.6));
+    animation:sweep 1.1s linear infinite;
+  }
+  @keyframes sweep{ 0%,100%{ opacity:0.9; } 50%{ opacity:0.3; } }
+ 
+  .output-section{ display:none; }
+  .output-section.visible{ display:block; margin-top:36px; padding-top:26px; border-top:1px solid var(--rule); }
+  .output-grid{ display:grid; grid-template-columns:1.15fr 1fr; gap:22px; align-items:start; }
+  @media (max-width:760px){ .output-grid{ grid-template-columns:1fr; } }
+ 
+  .output-panel{ padding:22px; }
+  .output-panel h3{ font-family:var(--slab); font-size:15px; font-weight:600; margin-bottom:5px; }
+  .output-panel .hint{ font-size:12px; color:var(--text-soft); margin-bottom:16px; }
+  .format-list{ display:flex; flex-direction:column; gap:8px; }
+  .format-chip{
+    display:flex; align-items:center; gap:11px; padding:11px 13px; border:1px solid var(--rule);
+    border-radius:4px; background:var(--panel); cursor:pointer; transition:border-color 0.14s, background 0.14s, transform 0.14s;
+  }
+  .format-chip:hover{ border-color:var(--brass); background:var(--brass-soft); transform:translateX(3px); }
+  .format-badge{ font-family:var(--mono); font-size:10px; font-weight:600; padding:3px 7px; border-radius:3px; background:var(--panel-raised); border:1px solid var(--rule); color:var(--text-soft); min-width:38px; text-align:center; }
+  .format-chip.xlsx .format-badge{ color:var(--teal); border-color:var(--teal); }
+  .format-name{ flex:1; font-size:12.5px; font-weight:500; }
+  .dl-icon{ width:13px; height:13px; color:var(--text-faint); flex-shrink:0; }
+ 
+  .preview-panel{ padding:0; overflow:hidden; }
+  .preview-head{ padding:13px 18px; border-bottom:1px solid var(--rule); display:flex; align-items:center; justify-content:space-between; background:var(--panel); }
+  .preview-head span{ font-family:var(--mono); font-size:10.5px; color:var(--text-soft); }
+  .copy-btn{ font-family:var(--mono); font-size:10.5px; background:none; border:1px solid var(--rule); border-radius:4px; padding:4px 10px; cursor:pointer; color:var(--text-soft); }
+  .copy-btn:hover{ border-color:var(--brass); color:var(--brass); }
+  .preview-body{ padding:18px; font-size:12.5px; line-height:1.8; color:var(--text); max-height:280px; overflow-y:auto; white-space:pre-wrap; font-family:var(--mono); }
+ 
+  #view-auth{ display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; padding:24px; }
+  .auth-card{ width:100%; max-width:380px; padding:32px 30px 26px; }
+  .auth-title{ font-family:var(--slab); font-size:19px; font-weight:600; margin-bottom:4px; }
+  .auth-sub{ font-size:12.5px; color:var(--text-soft); margin-bottom:22px; }
+  .auth-field{ margin-bottom:14px; }
+  .auth-field label{ display:block; font-size:11.5px; color:var(--text-faint); margin-bottom:6px; }
+  .auth-field input{
+    width:100%; padding:10px 13px; border:1px solid var(--rule); border-radius:4px;
+    background:var(--panel); font-family:var(--sans); font-size:13px; color:var(--text);
+    outline:none; transition:border-color 0.14s;
+  }
+  .auth-field input:focus{ border-color:var(--brass); }
+  .auth-btn{
+    width:100%; padding:12px; margin-top:8px; background:var(--brass); color:var(--ink); border:none;
+    border-radius:4px; font-family:var(--sans); font-size:13.5px; font-weight:600; cursor:pointer;
+  }
+  .auth-btn:hover{ background:#dbaf6d; }
+  .auth-btn:disabled{ opacity:0.45; cursor:not-allowed; }
+  .auth-switch{ margin-top:16px; font-size:12.5px; color:var(--text-soft); text-align:center; }
+  .auth-switch a{ color:var(--brass); font-weight:600; cursor:pointer; }
+  .auth-error{ display:none; margin-top:12px; font-size:12.5px; color:var(--danger); text-align:center; }
+</style>
+</head>
+<body>
+ 
+<div id="view-auth" style="display:none;">
+  <div class="brand" style="margin-bottom:32px;">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#faf9f5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V4h4"/><path d="M20 8V4h-4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+    </div>
+    <div class="brand-name">OCR Holding</div>
+  </div>
+ 
+  <div class="auth-card panel">
+    <div class="auth-title" id="auth-title">Connexion</div>
+    <div class="auth-sub" id="auth-sub">Accédez à votre espace de traitement.</div>
+ 
+    <div class="auth-field" id="auth-name-field" style="display:none;">
+      <label for="auth-name">Nom (optionnel)</label>
+      <input type="text" id="auth-name" autocomplete="nickname" placeholder="Votre nom">
+    </div>
+    <div class="auth-field">
+      <label for="auth-identifiant">Identifiant</label>
+      <input type="text" id="auth-identifiant" autocomplete="username" placeholder="identifiant">
+    </div>
+    <div class="auth-field">
+      <label for="auth-password">Mot de passe</label>
+      <input type="password" id="auth-password" autocomplete="current-password" placeholder="••••••••">
+    </div>
+ 
+    <button class="auth-btn" id="auth-submit" onclick="submitAuth()">Se connecter</button>
+    <div class="auth-error" id="auth-error"></div>
+ 
+    <div class="auth-switch">
+      <span id="auth-switch-text">Pas encore de compte ?</span>
+      <a id="auth-switch-link" onclick="toggleAuthMode()">Créer un compte</a>
+    </div>
+  </div>
+</div>
+ 
+<div id="view-landing">
+  <div class="hero">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#faf9f5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V4h4"/><path d="M20 8V4h-4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+      </div>
+      <div class="brand-name">OCR Holding</div>
+    </div>
+    <h1>Le bureau de numérisation</h1>
+    <p>Déposez un document, choisissez une opération. <strong>OCR</strong> reste l'outil principal — les autres ouvrent le même atelier.</p>
+  </div>
+ 
+  <div class="index-row">
+    <div class="tool-tab" onclick="openTool('ocr')">
+      <div class="tool-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="7" y1="9" x2="17" y2="9"/><line x1="7" y1="13" x2="14" y2="13"/></svg></div>
+      <div class="tool-tab-title">OCR</div>
+      <div class="tool-tab-sub">Texte &amp; tableaux</div>
+    </div>
+ 
+    <div class="tool-tab" onclick="openTool('pdf_to_png')">
+      <div class="tool-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h11l5 5v11H4z"/><circle cx="10" cy="13" r="1.6"/><path d="M6 18l3-3 2 2 4-4 3 3"/></svg></div>
+      <div class="tool-tab-title">PDF → PNG</div>
+      <div class="tool-tab-sub">Rasterisation</div>
+    </div>
+ 
+    <div class="tool-tab" onclick="openTool('png_to_pdf')">
+      <div class="tool-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="M9 21h9a2 2 0 0 0 2-2V8"/></svg></div>
+      <div class="tool-tab-title">PNG → PDF</div>
+      <div class="tool-tab-sub">Assemblage</div>
+    </div>
+ 
+    <div class="tool-tab" onclick="openTool('split_pdf')">
+      <div class="tool-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v18M4 3h6v8H4zM14 13h6v8h-6z"/></svg></div>
+      <div class="tool-tab-title">Split PDF</div>
+      <div class="tool-tab-sub">Découpage</div>
+    </div>
+ 
+    <div class="tool-tab" onclick="openTool('merge_pdf')">
+      <div class="tool-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h6v7H4zM14 4h6v7h-6z"/><path d="M10 11l2 3 2-3M12 14v6"/></svg></div>
+      <div class="tool-tab-title">Merge PDF</div>
+      <div class="tool-tab-sub">Fusion</div>
+    </div>
+  </div>
+</div>
+ 
+<div id="view-tool">
+  <aside class="sidebar">
+    <div class="sidebar-head" onclick="backToLanding()">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#faf9f5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V4h4"/><path d="M20 8V4h-4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+      </div>
+      <div class="brand-name">OCR Holding</div>
+    </div>
+ 
+    <div class="side-actions">
+      <div class="side-label">Outils</div>
+      <div class="side-item" data-tool="ocr" onclick="switchTool('ocr')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="7" y1="9" x2="17" y2="9"/></svg>OCR</div>
+      <div class="side-item" data-tool="pdf_to_png" onclick="switchTool('pdf_to_png')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h11l5 5v11H4z"/><circle cx="10" cy="13" r="1.4"/></svg>PDF → PNG</div>
+      <div class="side-item" data-tool="png_to_pdf" onclick="switchTool('png_to_pdf')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="14" height="14" rx="2"/></svg>PNG → PDF</div>
+      <div class="side-item" data-tool="split_pdf" onclick="switchTool('split_pdf')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v18M4 3h6v8H4zM14 13h6v8h-6z"/></svg>Split PDF</div>
+      <div class="side-item" data-tool="merge_pdf" onclick="switchTool('merge_pdf')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h6v7H4zM14 4h6v7h-6z"/></svg>Merge PDF</div>
+    </div>
+ 
+    <div class="hist-label">Historique</div>
+    <div class="history-list" id="history-list">
+      <div class="hist-empty">Chargement…</div>
+    </div>
+ 
+    <div class="user-box">
+      <div class="user-avatar" id="user-avatar">?</div>
+      <div class="user-name" id="user-name">—</div>
+      <button class="user-logout" onclick="logout()">Quitter</button>
+    </div>
+  </aside>
+ 
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <div class="topbar-title" id="tool-title">OCR</div>
+        <div class="topbar-sub" id="tool-sub">Extraction de texte &amp; tableaux</div>
+      </div>
+      <div class="status-chip" id="tool-status">En attente d'un fichier</div>
+    </div>
+ 
+    <div class="workspace">
+      <div id="job-flow">
+ 
+        <div id="options-area" class="options-row"></div>
+ 
+        <div class="dropzone" id="dropzone" onclick="document.getElementById('file-input').click()">
+          <span class="corner-tl"></span><span class="corner-tr"></span><span class="corner-bl"></span><span class="corner-br"></span>
+          <input type="file" id="file-input" multiple style="display:none;" onchange="handleFileSelect(event)">
+          <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4h11l5 5v11H4z"/><path d="M15 4v5h5"/><line x1="8" y1="14" x2="16" y2="14"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
+          <div class="drop-text">Déposez vos fichiers ou <strong>parcourez</strong></div>
+          <div class="drop-formats" id="drop-formats">PDF · PNG · JPG</div>
+        </div>
+ 
+        <div class="file-row panel" id="file-row">
+          <div class="file-row-head">
+            <div class="file-name-display" id="file-name-display">Fichiers sélectionnés</div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <button class="file-remove" onclick="event.stopPropagation();document.getElementById('file-input').click()" title="Remplacer">⇄ Remplacer</button>
+              <button class="file-remove" onclick="resetFlow(event)" title="Retirer">✕ Retirer</button>
+            </div>
+          </div>
+          <div id="file-list-display" class="file-list-display"></div>
+        </div>
+ 
+        <button class="run-btn" id="run-btn" onclick="runJob()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Lancer le traitement
+        </button>
+ 
+        <div class="progress-wrap" id="progress-wrap">
+          <div class="progress-label"><span id="progress-text">Traitement en cours</span><span id="progress-pct">0%</span></div>
+          <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+        </div>
+ 
+        <div class="output-section" id="output-section">
+          <div class="output-grid">
+            <div class="output-panel panel">
+              <h3>Résultats disponibles</h3>
+              <div class="hint" id="output-hint">Cliquez pour télécharger.</div>
+              <div class="format-list" id="format-list"></div>
+            </div>
+ 
+            <div class="preview-panel panel" id="preview-container">
+              <div class="preview-head"><span>Aperçu du texte</span><button class="copy-btn" onclick="copyPreview()">Copier</button></div>
+              <div class="preview-body" id="preview-body"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+ 
+<script>
+  let currentFiles = [];
+  let currentJobId = null;
+  let currentTool = 'ocr';
+  let pollTimer = null;
+ 
+  const AUTH_KEY = 'ocr_auth';
+  let authMode = 'login';
+ 
+  function getAuth(){ try { return JSON.parse(localStorage.getItem(AUTH_KEY)) || null; } catch(e){ return null; } }
+  function setAuth(a){ a ? localStorage.setItem(AUTH_KEY, JSON.stringify(a)) : localStorage.removeItem(AUTH_KEY); }
+  function getAccessToken(){ const a = getAuth(); return a ? a.access_token : null; }
+ 
+  async function authFetch(url, opts = {}, retry = true){
+    opts.headers = Object.assign({}, opts.headers, { 'Authorization': 'Bearer ' + getAccessToken() });
+    const res = await fetch(url, opts);
+    if (res.status === 401 && retry) {
+      const ok = await tryRefresh();
+      if (ok) return authFetch(url, opts, false);
+      showAuthView();
+      throw new Error('401');
+    }
+    return res;
+  }
+ 
+  async function tryRefresh(){
+    const a = getAuth();
+    if (!a) return false;
+    try {
+      const res = await fetch('/api/auth/refresh', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ refresh_token: a.refresh_token })
+      });
+      if (!res.ok) { setAuth(null); return false; }
+      setAuth(await res.json());
+      return true;
+    } catch(e){ return false; }
+  }
+ 
+  function showAuthView(){
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    currentJobId = null;
+    document.getElementById('view-tool').classList.remove('active');
+    document.getElementById('view-landing').style.display = 'none';
+    document.getElementById('view-auth').style.display = 'flex';
+  }
+ 
+  function showLandingView(){
+    const a = getAuth();
+    if (!a) { showAuthView(); return; }
+    document.getElementById('view-auth').style.display = 'none';
+    const u = a.user || {};
+    document.getElementById('user-name').textContent = u.name || u.identifiant || '—';
+    document.getElementById('user-avatar').textContent = (u.name || u.identifiant || '?').charAt(0).toUpperCase();
+    document.getElementById('view-landing').style.display = 'flex';
+    loadHistory();
+  }
+ 
+  function toggleAuthMode(){
+    authMode = (authMode === 'login') ? 'register' : 'login';
+    const isLogin = authMode === 'login';
+    document.getElementById('auth-title').textContent = isLogin ? 'Connexion' : 'Inscription';
+    document.getElementById('auth-sub').textContent = isLogin ? 'Accédez à votre espace de traitement.' : 'Créez votre compte pour commencer.';
+    document.getElementById('auth-name-field').style.display = isLogin ? 'none' : 'block';
+    document.getElementById('auth-submit').textContent = isLogin ? 'Se connecter' : "S'inscrire";
+    document.getElementById('auth-switch-text').textContent = isLogin ? 'Pas encore de compte ?' : 'Déjà inscrit ?';
+    document.getElementById('auth-switch-link').textContent = isLogin ? 'Créer un compte' : 'Se connecter';
+    document.getElementById('auth-error').style.display = 'none';
+  }
+ 
+  async function submitAuth(){
+    const identifiant = document.getElementById('auth-identifiant').value.trim();
+    const password = document.getElementById('auth-password').value;
+    const name = document.getElementById('auth-name').value.trim();
+    const errEl = document.getElementById('auth-error');
+    const btn = document.getElementById('auth-submit');
+    errEl.style.display = 'none';
+ 
+    if (!identifiant || !password) {
+      errEl.textContent = 'Identifiant et mot de passe requis.'; errEl.style.display = 'block'; return;
+    }
+    btn.disabled = true;
+    try {
+      const body = { identifiant, password };
+      if (authMode === 'register' && name) body.name = name;
+      const res = await fetch('/api/auth/' + authMode, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Erreur d\'authentification.');
+      setAuth(data);
+      showLandingView();
+    } catch(e) {
+      errEl.textContent = typeof e.detail === 'string' ? e.detail : (e.message || 'Erreur.');
+      errEl.style.display = 'block';
+    } finally {
+      btn.disabled = false;
+    }
+  }
+ 
+  async function logout(){
+    const a = getAuth();
+    if (a) {
+      try { await fetch('/api/auth/logout', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ refresh_token: a.refresh_token })
+      }); } catch(e){}
+    }
+    setAuth(null);
+    showAuthView();
+  }
+ 
+  ['auth-identifiant','auth-password','auth-name'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') submitAuth(); });
+  });
+ 
+  (async () => {
+    if (getAuth()) {
+      const ok = await tryRefresh();
+      ok ? showLandingView() : showAuthView();
+    } else {
+      showAuthView();
+    }
+  })();
+ 
+  async function loadHistory() {
+    try {
+        const res = await authFetch('/api/history');
+        const history = await res.json();
+        const list = document.getElementById('history-list');
+        list.innerHTML = '';
+        if(history.items.length === 0) {
+            list.innerHTML = '<div class="hist-empty">Aucune tâche pour l\'instant</div>';
+        } else {
+            history.items.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'hist-item';
+                div.dataset.jobId = item.job_id;
+                const main = document.createElement('div');
+                main.className = 'hist-item-main';
+                main.style.cursor = 'pointer';
+                main.onclick = () => openSession(item.job_id);
+                main.innerHTML = `
+                <div class="hist-name" title="${item.filename}">${item.filename}</div>
+                <div class="hist-meta"><span class="hist-dot" style="background:${item.status === 'complete' ? 'var(--teal)' : (item.status === 'error' ? 'var(--danger)' : 'var(--amber)')}"></span>${item.action_type.toUpperCase()} · ${item.status}</div>`;
+                const delBtn = document.createElement('button');
+                delBtn.className = 'hist-delete';
+                delBtn.title = 'Supprimer';
+                delBtn.textContent = '✕';
+                delBtn.onclick = (e) => { e.stopPropagation(); deleteHistoryItem(item.job_id); };
+                div.appendChild(main);
+                div.appendChild(delBtn);
+                list.appendChild(div);
+            });
+        }
+    } catch(e) {
+        console.error(e);
+    }
+  }
+ 
+  async function deleteHistoryItem(jobId){
+    if (!confirm('Supprimer définitivement cet élément de l\'historique ?')) return;
+    try {
+        const res = await authFetch(`/api/history/${jobId}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Suppression échouée.');
+        if (currentJobId === jobId) resetFlow();
+        loadHistory();
+    } catch(e) {
+        console.error(e);
+    }
+  }
+ 
+  async function openSession(jobId){
+    try {
+        const res = await authFetch(`/api/jobs/${jobId}`);
+        if(!res.ok) throw new Error('Job introuvable.');
+        const data = await res.json();
+ 
+        document.getElementById('view-auth').style.display = 'none';
+        document.getElementById('view-landing').style.display = 'none';
+        document.getElementById('view-tool').classList.add('active');
+ 
+        switchTool(data.action_type || 'ocr');
+        currentJobId = jobId;
+ 
+        if(data.status === 'complete') {
+            finishJob(data);
+            restoreSourceFiles(data);
+        } else if(data.status === 'error') {
+            document.getElementById('tool-status').textContent = 'Erreur lors du traitement';
+        } else {
+            document.getElementById('progress-wrap').classList.add('visible');
+            document.getElementById('run-btn').disabled = true;
+            document.getElementById('tool-status').textContent = 'Traitement… ' + (data.progress ?? 0) + '%';
+            pollProgress();
+        }
+    } catch(e) {
+        console.error(e);
+    }
+  }
+ 
+  function openTool(tool){
+    document.getElementById('view-landing').style.display = 'none';
+    document.getElementById('view-tool').classList.add('active');
+    switchTool(tool);
+  }
+  function backToLanding(){
+    document.getElementById('view-tool').classList.remove('active');
+    document.getElementById('view-landing').style.display = 'flex';
+  }
+ 
+  const TOOL_META = {
+    ocr:        { title:'OCR',          sub:"Extraction de texte & tableaux", formats: "PDF · PNG · JPG" },
+    pdf_to_png: { title:'PDF → PNG',    sub:"Rasterisation des pages", formats: "PDF" },
+    png_to_pdf: { title:'PNG → PDF',    sub:"Assemblage en document", formats: "PNG" },
+    split_pdf:  { title:'Split PDF',    sub:"Découpage par plages de pages", formats: "PDF" },
+    merge_pdf:  { title:'Merge PDF',    sub:"Fusion de plusieurs fichiers", formats: "PDF" },
+  };
+ 
+  function switchTool(tool){
+    currentTool = tool;
+    document.querySelectorAll('.side-item').forEach(el => el.classList.toggle('active', el.dataset.tool === tool));
+    document.getElementById('tool-title').textContent = TOOL_META[tool].title;
+    document.getElementById('tool-sub').textContent = TOOL_META[tool].sub;
+    document.getElementById('drop-formats').textContent = TOOL_META[tool].formats;
+ 
+    const optionsArea = document.getElementById('options-area');
+    if (tool === 'ocr') {
+        optionsArea.innerHTML = `
+          <label>Modèle OCR</label>
+          <select id="ocr-model"></select>`;
+        populateEngineSelect();
+    } else if (tool === 'split_pdf') {
+        optionsArea.innerHTML = `
+          <label>Plages (ex : 1-3, 4-6)</label>
+          <input type="text" id="split-ranges" value="1-2" style="width:150px;">
+        `;
+    } else if (tool === 'pdf_to_png') {
+        optionsArea.innerHTML = `
+          <label>DPI (qualité)</label>
+          <input type="number" id="pdf-dpi" value="200" style="width:80px;">
+        `;
+    } else {
+        optionsArea.innerHTML = `<div class="options-note">Sélectionnez plusieurs fichiers pour cette action.</div>`;
+    }
+ 
+    resetFlow();
+  }
+ 
+  const ENGINE_LABELS = {
+    rapidocr:    'RapidOCR (ONNX) — rapide',
+    docling:     'Docling (IBM) — mise en page + tableaux',
+    marker:      'Marker-PDF — markdown complet',
+    qwen35_vl:   'Qwen3.5-VL 2B (VLM local)',
+    qwen_ollama: 'Qwen3.5 via Ollama (VLM local)',
+    easyocr:     'EasyOCR (PyTorch) — polyvalent ⚠ GPU',
+    surya:       'Surya OCR (PyTorch) — haute précision ⚠ GPU',
+    doctr:       'DocTR (PyTorch) — orienté document ⚠ GPU',
+    keras:       'Keras-OCR (TensorFlow) — robuste ⚠ GPU',
+  };
+  const ENGINE_ORDER = ['rapidocr','qwen_ollama','qwen35_vl','docling','marker','easyocr','surya','doctr','keras'];
+  let enginesCache = null;
+ 
+  async function populateEngineSelect(){
+    const select = document.getElementById('ocr-model');
+    if (!select) return;
+    let ids;
+    try {
+      if (!enginesCache) {
+        const res = await authFetch('/api/engines');
+        enginesCache = (await res.json()).engines.map(e => e.id);
+      }
+      ids = enginesCache.filter(id => ENGINE_LABELS[id]);
+    } catch(e) {
+      ids = ['rapidocr', 'docling', 'marker', 'qwen35_vl'];
+    }
+    ids.sort((a,b) => ENGINE_ORDER.indexOf(a) - ENGINE_ORDER.indexOf(b));
+    const prev = select.value;
+    select.innerHTML = ids.map(id =>
+      `<option value="${id}">${ENGINE_LABELS[id] || id}</option>`).join('');
+    if (prev && ids.includes(prev)) select.value = prev;
+  }
+ 
+  function handleFileSelect(e){
+    if(e.target.files && e.target.files.length > 0){
+      currentFiles = Array.from(e.target.files);
+      renderFileList();
+    }
+  }
+ 
+  function renderFileList(){
+    if (currentFiles.length === 0) return;
+ 
+    let totalSize = 0;
+    let names = [];
+    currentFiles.forEach(f => {
+        totalSize += f.size;
+        names.push(`• ${f.name} (${(f.size / (1024*1024)).toFixed(1)} Mo)`);
+    });
+ 
+    document.getElementById('file-name-display').textContent = `${currentFiles.length} fichier(s) sélectionné(s) — ${(totalSize / (1024*1024)).toFixed(1)} Mo total`;
+    document.getElementById('file-list-display').innerHTML = names.join('<br/>');
+ 
+    document.getElementById('dropzone').style.display = 'none';
+    document.getElementById('file-row').classList.add('visible');
+    document.getElementById('run-btn').classList.add('visible');
+    document.getElementById('tool-status').textContent = 'Prêt';
+  }
+ 
+  async function restoreSourceFiles(data){
+    try {
+      const srcs = data.sources || [];
+      if (!srcs.length) return;
+      const files = [];
+      for (let i = 0; i < srcs.length; i++) {
+        const res = await authFetch(`/api/jobs/${data.job_id}/source?file=${i}`);
+        if (!res.ok) return;
+        const blob = await res.blob();
+        files.push(new File([blob], srcs[i].filename || `document_${i+1}`,
+                            { type: blob.type || 'application/pdf' }));
+      }
+      currentFiles = files;
+      const dt = new DataTransfer();
+      files.forEach(f => dt.items.add(f));
+      document.getElementById('file-input').files = dt.files;
+      renderFileList();
+    } catch(e) {
+      console.error(e);
+    }
+  }
+ 
+  const dropzone = document.getElementById('dropzone');
+  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.style.background = 'var(--panel-raised)'; });
+  dropzone.addEventListener('dragleave', (e) => { e.preventDefault(); dropzone.style.background = 'var(--panel)'; });
+  dropzone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropzone.style.background = 'var(--panel)';
+    if(e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      document.getElementById('file-input').files = e.dataTransfer.files;
+      handleFileSelect({target: {files: e.dataTransfer.files}});
+    }
+  });
+ 
+  function resetFlow(e){
+    if(e) e.stopPropagation();
+    currentFiles = [];
+    currentJobId = null;
+    document.getElementById('file-input').value = "";
+    document.getElementById('dropzone').style.display = 'block';
+    document.getElementById('file-row').classList.remove('visible');
+    document.getElementById('run-btn').classList.remove('visible');
+    document.getElementById('progress-wrap').classList.remove('visible');
+    document.getElementById('output-section').classList.remove('visible');
+    document.getElementById('tool-status').textContent = "En attente";
+    document.getElementById('run-btn').disabled = false;
+  }
+ 
+  async function runJob(){
+    if(currentFiles.length === 0) return;
+ 
+    document.getElementById('run-btn').disabled = true;
+    document.getElementById('progress-wrap').classList.add('visible');
+    document.getElementById('tool-status').textContent = 'Transfert…';
+ 
+    const formData = new FormData();
+    currentFiles.forEach(f => formData.append("files", f));
+    formData.append("action_type", currentTool);
+ 
+    let options = {};
+    if (currentTool === 'ocr') {
+        options.ocr_model = document.getElementById('ocr-model').value;
+    } else if (currentTool === 'split_pdf') {
+        const rangesStr = document.getElementById('split-ranges').value;
+        const ranges = rangesStr.split(',').map(r => {
+            const parts = r.split('-');
+            return [parseInt(parts[0]), parseInt(parts[1])];
+        });
+        options.ranges = ranges;
+    } else if (currentTool === 'pdf_to_png') {
+        options.dpi = parseInt(document.getElementById('pdf-dpi').value);
+    }
+ 
+    formData.append("options", JSON.stringify(options));
+ 
+    try {
+        const res = await authFetch('/api/jobs', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await res.json();
+ 
+        if(!res.ok) {
+            throw new Error(data.message || "Erreur transfert");
+        }
+ 
+        currentJobId = data.job_id;
+ 
+        loadHistory();
+        pollProgress();
+    } catch (err) {
+        console.error(err);
+        document.getElementById('tool-status').textContent = err.message || 'Erreur transfert';
+        document.getElementById('run-btn').disabled = false;
+        document.getElementById('progress-wrap').classList.remove('visible');
+    }
+  }
+ 
+  async function pollProgress() {
+    if(!currentJobId) return;
+ 
+    const fill = document.getElementById('progress-fill');
+    const label = document.getElementById('progress-pct');
+ 
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+        try {
+            const res = await authFetch(`/api/jobs/${currentJobId}`);
+            if(!res.ok) throw new Error("Job err");
+            const data = await res.json();
+ 
+            if (data.progress !== undefined) {
+                fill.style.width = data.progress + '%';
+                label.textContent = data.progress + '%';
+                document.getElementById('tool-status').textContent = 'Traitement… ' + data.progress + '%';
+            }
+ 
+            if(data.status === 'complete' || data.status === 'error') {
+                clearInterval(pollTimer); pollTimer = null;
+                if(data.status === 'complete') {
+                    finishJob(data);
+                } else {
+                    document.getElementById('tool-status').textContent = 'Erreur lors du traitement';
+                }
+                loadHistory();
+            }
+        } catch(e) {
+            console.error(e);
+        }
+    }, 1000);
+  }
+ 
+  async function finishJob(data){
+    document.getElementById('output-section').classList.add('visible');
+    document.getElementById('tool-status').textContent = 'Terminé';
+    document.getElementById('run-btn').disabled = false;
+ 
+    const formatList = document.getElementById('format-list');
+    formatList.innerHTML = '';
+ 
+    let hasTables = false;
+ 
+    data.outputs.forEach(out => {
+        let name = out.label || "Fichier";
+        let badge = out.format.toUpperCase();
+        let isXlsx = out.format === 'xlsx';
+ 
+        if(out.format === 'md') name = "Texte — Markdown";
+        if(out.format === 'txt') name = "Texte brut";
+        if(out.format === 'docx') name = "Document Word";
+        if(isXlsx) hasTables = true;
+ 
+        formatList.innerHTML += `
+            <a class="format-chip ${isXlsx ? 'xlsx' : ''}" href="/api/jobs/${data.job_id}/output?output_id=${out.output_id}&token=${encodeURIComponent(getAccessToken())}">
+                <span class="format-badge">${badge}</span><span class="format-name">${name}</span>
+                <svg class="dl-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v13m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
+            </a>
+        `;
+    });
+ 
+    if(data.action_type === 'ocr' && hasTables) {
+        document.getElementById('output-hint').textContent = 'Tableaux détectés — export .xlsx activé';
+    } else {
+        document.getElementById('output-hint').textContent = data.outputs.length + ' fichier(s) généré(s).';
+    }
+ 
+    if (data.action_type === 'ocr') {
+        document.getElementById('preview-container').style.display = 'block';
+        document.getElementById('preview-body').textContent = data.preview_text || "Aucun texte extrait.";
+    } else {
+        document.getElementById('preview-container').style.display = 'none';
+    }
+ 
+    (data.sources || []).forEach((src, i) => {
+        formatList.innerHTML += `
+            <a class="format-chip" href="/api/jobs/${data.job_id}/source?file=${i}&token=${encodeURIComponent(getAccessToken())}">
+                <span class="format-badge">SRC</span><span class="format-name">Document original — ${src.filename}</span>
+                <svg class="dl-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v13m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
+            </a>`;
+    });
+  }
+ 
+  function copyPreview(){
+    const text = document.getElementById('preview-body').textContent;
+    navigator.clipboard.writeText(text);
+    const btn = document.querySelector('.copy-btn');
+    const original = btn.textContent;
+    btn.textContent = 'Copié ✓';
+    setTimeout(() => btn.textContent = original, 1200);
+  }
+</script>
+ 
+</body>
+</html>
