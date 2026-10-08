@@ -166,3 +166,21 @@ MIT – feel free to use, modify, and distribute.
 ## Contact
 
 ---
+
+---
+
+## Security notes
+
+- **Secrets:** copy `.env.example` to `.env`. With `APP_ENV=production` the app refuses to start without a random `JWT_SECRET` (≥ 32 chars); `docker compose` also requires `POSTGRES_PASSWORD`.
+- **Auth:** 30‑min access JWTs, single‑use refresh tokens stored as SHA‑256 digests, login throttling (app + nginx), bcrypt with constant‑time checks. Set `ALLOW_REGISTRATION=0` once your accounts exist.
+- **Downloads** use the `Authorization` header only — tokens are never accepted in URLs.
+- **Uploads:** content sniffed by magic bytes (PDF/images only), size/page/file‑count caps (`MAX_UPLOAD_MB`, `MAX_PDF_PAGES`, `MAX_FILES_PER_JOB`), stored under server‑generated names. Job options are strictly validated.
+- **Deployment:** container runs as non‑root with a read‑only filesystem; the app port is bound to loopback so traffic goes through nginx (TLS 1.2+, HSTS, rate limits). CORS is same‑origin unless `CORS_ORIGINS` is set.
+- Existing users must log in again after upgrading (refresh tokens are now hashed).
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```

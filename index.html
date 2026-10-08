@@ -444,6 +444,11 @@
   function setAuth(a){ a ? localStorage.setItem(AUTH_KEY, JSON.stringify(a)) : localStorage.removeItem(AUTH_KEY); }
   function getAccessToken(){ const a = getAuth(); return a ? a.access_token : null; }
  
+  // Escape untrusted text (filenames, labels) before it goes into innerHTML.
+  function esc(v){
+    return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
   async function authFetch(url, opts = {}, retry = true){
     opts.headers = Object.assign({}, opts.headers, { 'Authorization': 'Bearer ' + getAccessToken() });
     const res = await fetch(url, opts);
@@ -456,7 +461,14 @@
     return res;
   }
  
-  async function tryRefresh(){
+  // Refresh tokens are single-use: share one in-flight refresh between parallel 401s.
+  let refreshInFlight = null;
+  function tryRefresh(){
+    if (!refreshInFlight) refreshInFlight = doRefresh().finally(() => { refreshInFlight = null; });
+    return refreshInFlight;
+  }
+
+  async function doRefresh(){
     const a = getAuth();
     if (!a) return false;
     try {
@@ -574,8 +586,8 @@
                 main.style.cursor = 'pointer';
                 main.onclick = () => openSession(item.job_id);
                 main.innerHTML = `
-                <div class="hist-name" title="${item.filename}">${item.filename}</div>
-                <div class="hist-meta"><span class="hist-dot" style="background:${item.status === 'complete' ? 'var(--teal)' : (item.status === 'error' ? 'var(--danger)' : 'var(--amber)')}"></span>${item.action_type.toUpperCase()} · ${item.status}</div>`;
+                <div class="hist-name" title="${esc(item.filename)}">${esc(item.filename)}</div>
+                <div class="hist-meta"><span class="hist-dot" style="background:${item.status === 'complete' ? 'var(--teal)' : (item.status === 'error' ? 'var(--danger)' : 'var(--amber)')}"></span>${esc(item.action_type.toUpperCase())} · ${esc(item.status)}</div>`;
                 const delBtn = document.createElement('button');
                 delBtn.className = 'hist-delete';
                 delBtn.title = 'Supprimer';
@@ -671,7 +683,7 @@
     } else if (tool === 'pdf_to_png') {
         optionsArea.innerHTML = `
           <label>DPI (qualité)</label>
-          <input type="number" id="pdf-dpi" value="200" style="width:80px;">
+          <input type="number" id="pdf-dpi" value="200" min="72" max="400" style="width:80px;">
         `;
     } else {
         optionsArea.innerHTML = `<div class="options-note">Sélectionnez plusieurs fichiers pour cette action.</div>`;
@@ -710,7 +722,7 @@
     ids.sort((a,b) => ENGINE_ORDER.indexOf(a) - ENGINE_ORDER.indexOf(b));
     const prev = select.value;
     select.innerHTML = ids.map(id =>
-      `<option value="${id}">${ENGINE_LABELS[id] || id}</option>`).join('');
+      `<option value="${esc(id)}">${esc(ENGINE_LABELS[id] || id)}</option>`).join('');
     if (prev && ids.includes(prev)) select.value = prev;
   }
  
@@ -728,7 +740,7 @@
     let names = [];
     currentFiles.forEach(f => {
         totalSize += f.size;
-        names.push(`• ${f.name} (${(f.size / (1024*1024)).toFixed(1)} Mo)`);
+        names.push(`• ${esc(f.name)} (${(f.size / (1024*1024)).toFixed(1)} Mo)`);
     });
  
     document.getElementById('file-name-display').textContent = `${currentFiles.length} fichier(s) sélectionné(s) — ${(totalSize / (1024*1024)).toFixed(1)} Mo total`;
@@ -879,27 +891,26 @@
  
     const formatList = document.getElementById('format-list');
     formatList.innerHTML = '';
- 
+
     let hasTables = false;
- 
+
     data.outputs.forEach(out => {
         let name = out.label || "Fichier";
         let badge = out.format.toUpperCase();
         let isXlsx = out.format === 'xlsx';
- 
+
         if(out.format === 'md') name = "Texte — Markdown";
         if(out.format === 'txt') name = "Texte brut";
         if(out.format === 'docx') name = "Document Word";
         if(isXlsx) hasTables = true;
- 
-        formatList.innerHTML += `
-            <a class="format-chip ${isXlsx ? 'xlsx' : ''}" href="/api/jobs/${data.job_id}/output?output_id=${out.output_id}&token=${encodeURIComponent(getAccessToken())}">
-                <span class="format-badge">${badge}</span><span class="format-name">${name}</span>
-                <svg class="dl-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v13m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
-            </a>
-        `;
+
+        formatList.appendChild(makeDownloadChip({
+            url: `/api/jobs/${encodeURIComponent(data.job_id)}/output?output_id=${encodeURIComponent(out.output_id)}`,
+            saveAs: `${out.output_id}.${out.format}`,
+            badge, name, extraClass: isXlsx ? 'xlsx' : '',
+        }));
     });
- 
+
     if(data.action_type === 'ocr' && hasTables) {
         document.getElementById('output-hint').textContent = 'Tableaux détectés — export .xlsx activé';
     } else {
@@ -914,12 +925,37 @@
     }
  
     (data.sources || []).forEach((src, i) => {
-        formatList.innerHTML += `
-            <a class="format-chip" href="/api/jobs/${data.job_id}/source?file=${i}&token=${encodeURIComponent(getAccessToken())}">
-                <span class="format-badge">SRC</span><span class="format-name">Document original — ${src.filename}</span>
-                <svg class="dl-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v13m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
-            </a>`;
+        formatList.appendChild(makeDownloadChip({
+            url: `/api/jobs/${encodeURIComponent(data.job_id)}/source?file=${i}`,
+            saveAs: src.filename,
+            badge: 'SRC', name: `Document original — ${src.filename}`, extraClass: '',
+        }));
     });
+  }
+
+  // Download card: fetches with the Authorization header (tokens never go in URLs)
+  // and saves the blob. Text is set via textContent, so filenames cannot inject HTML.
+  function makeDownloadChip({url, saveAs, badge, name, extraClass}){
+    const a = document.createElement('a');
+    a.className = 'format-chip' + (extraClass ? ' ' + extraClass : '');
+    a.href = '#';
+    const b = document.createElement('span'); b.className = 'format-badge'; b.textContent = badge;
+    const n = document.createElement('span'); n.className = 'format-name'; n.textContent = name;
+    a.append(b, n);
+    a.insertAdjacentHTML('beforeend', '<svg class="dl-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v13m0 0l-4-4m4 4l4-4M5 21h14"/></svg>');
+    a.addEventListener('click', async (e) => {
+        e.preventDefault();
+        try {
+            const res = await authFetch(url);
+            if (!res.ok) throw new Error('Téléchargement impossible.');
+            const blobUrl = URL.createObjectURL(await res.blob());
+            const dl = document.createElement('a');
+            dl.href = blobUrl; dl.download = saveAs;
+            document.body.appendChild(dl); dl.click(); dl.remove();
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+        } catch (err) { alert(err.message); }
+    });
+    return a;
   }
  
   function copyPreview(){

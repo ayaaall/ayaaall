@@ -20,11 +20,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import ForeignKey, Integer, String, Text, select, update
+from sqlalchemy import ForeignKey, Integer, String, Text, delete, func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.core.config import DATABASE_URL, REFRESH_TOKEN_EXPIRE_DAYS
+from app.core.security import hash_refresh_token
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +54,10 @@ class User(Base):
 
 
 class Session(Base):
-    """Refresh-token record. `revoked` flips to 1 on logout / token rotation."""
+    """Refresh-token record. `revoked` flips to 1 on logout / token rotation.
+
+    `token` holds the SHA-256 digest of the refresh token, never the raw value.
+    """
 
     __tablename__ = "sessions"
 
@@ -100,7 +104,9 @@ async def init_db() -> None:
             )
         log.info("Added jobs.source_files column")
     except Exception:
-        pass  # column already exists
+        log.debug("jobs.source_files already present")  # column already exists
+
+    await purge_expired_sessions()
 
 
 # ── User helpers ───────────────────────────────────────────────────────────────
@@ -128,16 +134,17 @@ async def create_user(user_id: str, identifiant: str, password_hash: str,
 
 # ── Refresh-session helpers ────────────────────────────────────────────────────
 
-async def create_session(token: str, user_id: str) -> None:
+async def create_session(raw_token: str, user_id: str) -> None:
     expires = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     async with SessionLocal() as db:
-        db.add(Session(token=token, user_id=user_id, expires_at=expires.isoformat()))
+        db.add(Session(token=hash_refresh_token(raw_token), user_id=user_id,
+                       expires_at=expires.isoformat()))
         await db.commit()
 
 
-async def get_valid_session(token: str) -> Optional[Session]:
+async def get_valid_session(raw_token: str) -> Optional[Session]:
     async with SessionLocal() as db:
-        sess = await db.get(Session, token)
+        sess = await db.get(Session, hash_refresh_token(raw_token))
         if sess is None or sess.revoked:
             return None
         if datetime.fromisoformat(sess.expires_at) < datetime.now(timezone.utc):
@@ -145,9 +152,41 @@ async def get_valid_session(token: str) -> Optional[Session]:
         return sess
 
 
-async def revoke_session(token: str) -> None:
+async def consume_session(raw_token: str) -> Optional[Session]:
+    """Atomically revoke a refresh token and return its session.
+
+    Returns None when the token is unknown, expired, or was already used —
+    so two concurrent refreshes with the same token cannot both succeed.
+    """
+    digest = hash_refresh_token(raw_token)
     async with SessionLocal() as db:
-        await db.execute(update(Session).where(Session.token == token).values(revoked=1))
+        result = await db.execute(
+            update(Session)
+            .where(Session.token == digest, Session.revoked == 0)
+            .values(revoked=1)
+        )
+        await db.commit()
+        if result.rowcount != 1:
+            return None
+        sess = await db.get(Session, digest)
+    if sess is None or datetime.fromisoformat(sess.expires_at) < datetime.now(timezone.utc):
+        return None
+    return sess
+
+
+async def revoke_session(raw_token: str) -> None:
+    async with SessionLocal() as db:
+        await db.execute(
+            update(Session).where(Session.token == hash_refresh_token(raw_token)).values(revoked=1)
+        )
+        await db.commit()
+
+
+async def purge_expired_sessions() -> None:
+    """Drop expired or revoked refresh sessions (housekeeping at startup)."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with SessionLocal() as db:
+        await db.execute(delete(Session).where((Session.expires_at < now) | (Session.revoked == 1)))
         await db.commit()
 
 
@@ -170,11 +209,10 @@ async def get_job(job_id: str) -> Optional[Job]:
 
 async def count_jobs(user_id: Optional[str]) -> int:
     async with SessionLocal() as db:
-        q = select(Job.id)
+        q = select(func.count()).select_from(Job)
         if user_id is not None:
             q = q.where(Job.user_id == user_id)
-        rows = await db.execute(q)
-        return len(rows.all())
+        return (await db.execute(q)).scalar_one()
 
 
 async def list_jobs(user_id: Optional[str], limit: int, offset: int) -> list[Job]:
@@ -186,15 +224,17 @@ async def list_jobs(user_id: Optional[str], limit: int, offset: int) -> list[Job
         return list(rows.scalars().all())
 
 
-async def delete_job(job_id: str, user_id: Optional[str] = None) -> None:
+async def delete_job(job_id: str, user_id: Optional[str] = None) -> bool:
+    """Delete a job record. Returns True if a row owned by `user_id` was removed."""
     async with SessionLocal() as db:
         job = await db.get(Job, job_id)
         if job is None:
-            return
+            return False
         if user_id is not None and job.user_id != user_id:
-            return
+            return False
         await db.delete(job)
         await db.commit()
+        return True
 
 
 async def update_job(

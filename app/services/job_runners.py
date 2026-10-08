@@ -6,28 +6,41 @@ All background task implementations.
 Each runner follows the same contract:
     async def run_*(job_id, file_paths, options) -> None
 
-They update job state via `database.update_job` and write output
-files to `results/{job_id}/`. Errors are caught and stored so the
-UI can surface a meaningful status to the user.
+The `@job_runner` decorator handles the shared plumbing — concurrency limit,
+"processing" → "complete"/"error" state transitions and error logging — so
+each runner only contains its actual work and returns the list of outputs.
+Blocking PyMuPDF / OCR calls run in worker threads, never on the event loop.
+Output files are written to `results/{job_id}/`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
-import os
 from pathlib import Path
-from typing import List
+from typing import Awaitable, Callable, List
 
 import fitz         # PyMuPDF
 import pandas as pd
 from docx import Document
 
-from app.core.config import UPLOAD_DIR, RESULTS_DIR, DEFAULT_OCR_DPI, DEFAULT_EXPORT_DPI
+from app.core.config import (
+    DEFAULT_OCR_DPI,
+    MAX_CONCURRENT_JOBS,
+    MAX_PDF_PAGES,
+    RESULTS_DIR,
+    UPLOAD_DIR,
+)
 from app.core.database import update_job
 from app.services.ocr_engine import engine_input, extract_document, extract_text
 
 log = logging.getLogger(__name__)
+
+_slots = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+
+Output = dict
+RunnerResult = tuple[list[Output], str | None]   # (outputs, preview_text)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -39,266 +52,244 @@ def _res_dir(job_id: str) -> Path:
     return path
 
 
-def _size(path: Path) -> int:
-    return path.stat().st_size
+def _output(path: Path, output_id: str, fmt: str, label: str | None = None) -> Output:
+    out = {"output_id": output_id, "format": fmt, "size_bytes": path.stat().st_size}
+    if label:
+        out["label"] = label
+    return out
+
+
+def _open_pdf(path: str) -> fitz.Document:
+    """Open a PDF, rejecting encrypted files and oversized page counts."""
+    doc = fitz.open(path)
+    if doc.needs_pass:
+        doc.close()
+        raise ValueError("Encrypted PDFs are not supported.")
+    if len(doc) > MAX_PDF_PAGES:
+        n = len(doc)
+        doc.close()
+        raise ValueError(f"PDF has {n} pages; the limit is {MAX_PDF_PAGES}.")
+    return doc
+
+
+def job_runner(fn: Callable[..., Awaitable[RunnerResult]]):
+    """Wrap a runner with concurrency limiting and job state management."""
+
+    @functools.wraps(fn)
+    async def wrapper(job_id: str, file_paths: List[str], options: dict) -> None:
+        async with _slots:
+            try:
+                await update_job(job_id, status="processing", progress=10)
+                outputs, preview = await fn(job_id, file_paths, options)
+                await update_job(job_id, status="complete", progress=100,
+                                 outputs=outputs, preview_text=preview)
+                log.info("Job %s (%s) complete: %d output(s)", job_id, fn.__name__, len(outputs))
+            except Exception:
+                log.exception("Job %s (%s) failed", job_id, fn.__name__)
+                await update_job(job_id, status="error")
+
+    return wrapper
 
 
 # ── OCR ────────────────────────────────────────────────────────────────────────
 
-async def run_ocr(job_id: str, file_paths: List[str], options: dict) -> None:
+def _image_to_pdf(src: str, dest: str) -> None:
+    with fitz.open(src) as img_doc:
+        pdf_bytes = img_doc.convert_to_pdf()
+    with fitz.open("pdf", pdf_bytes) as wrapped:
+        wrapped.save(dest)
+
+
+def _write_ocr_outputs(res: Path, full_text: str, md_text: str | None, tables: list) -> list[Output]:
+    outputs: list[Output] = []
+
+    p = res / "out_txt.txt"
+    p.write_text(full_text, encoding="utf-8")
+    outputs.append(_output(p, "out_txt", "txt"))
+
+    # Engines like docling/marker/qwen provide real markdown.
+    p = res / "out_md.md"
+    p.write_text(f"# OCR Result\n\n{md_text or full_text}", encoding="utf-8")
+    outputs.append(_output(p, "out_md", "md"))
+
+    p = res / "out_docx.docx"
+    doc_out = Document()
+    doc_out.add_paragraph(_strip_xml_invalid(full_text))
+    doc_out.save(str(p))
+    outputs.append(_output(p, "out_docx", "docx"))
+
+    # Tables may be DataFrames (docling/marker) or raw row-lists (PyMuPDF).
+    if tables:
+        p = res / "out_xlsx.xlsx"
+        with pd.ExcelWriter(str(p)) as writer:
+            for idx, tbl in enumerate(tables):
+                df = tbl if isinstance(tbl, pd.DataFrame) else pd.DataFrame(tbl)
+                df.to_excel(writer, sheet_name=f"Table_{idx + 1}", index=False, header=False)
+        outputs.append(_output(p, "out_xlsx", "xlsx", "Extracted tables"))
+    return outputs
+
+
+def _strip_xml_invalid(text: str) -> str:
+    """python-docx raises on control characters that OCR output can contain."""
+    return "".join(ch for ch in text if ch in "\n\t" or ord(ch) >= 32)
+
+
+@job_runner
+async def run_ocr(job_id: str, file_paths: List[str], options: dict) -> RunnerResult:
     """
     Extract text (and optionally tables) from a PDF or image file.
 
-    Outputs
-    -------
-    - {job_id}/out_txt.txt   — plain text
-    - {job_id}/out_md.md     — Markdown document
-    - {job_id}/out_docx.docx — Word document
-    - {job_id}/out_xlsx.xlsx — Excel workbook (only when tables found)
+    Outputs: out_txt.txt, out_md.md, out_docx.docx, and out_xlsx.xlsx when
+    tables were found.
     """
-    try:
-        await update_job(job_id, status="processing", progress=10)
+    src   = file_paths[0]
+    is_pdf = Path(src).suffix.lower() == ".pdf"
+    model = options.get("ocr_model", "rapidocr")
+    res   = _res_dir(job_id)
 
-        src      = file_paths[0]
-        ext      = Path(src).suffix.lstrip(".").lower()
-        model    = options.get("ocr_model", "rapidocr")
-        res      = _res_dir(job_id)
+    md_text: str | None = None
+    tables: list = []
 
-        full_text: str = ""
-        md_text: str | None = None
-        tables: list   = []
+    if engine_input(model) == "pdf":
+        # Document-native engine (docling | marker): parses the PDF directly.
+        pdf_src = src
+        wrapped = None
+        if not is_pdf:
+            wrapped = UPLOAD_DIR / f"{job_id}_wrapped.pdf"
+            await asyncio.to_thread(_image_to_pdf, src, str(wrapped))
+            pdf_src = str(wrapped)
+        try:
+            result = await asyncio.to_thread(extract_document, pdf_src, model)
+        finally:
+            if wrapped is not None:
+                wrapped.unlink(missing_ok=True)
+        full_text = result["text"]
+        md_text   = result.get("markdown")
+        tables    = result.get("tables") or []
+        await update_job(job_id, progress=90)
 
-        if engine_input(model) == "pdf":
-            # ── Document-native engine (docling | marker) ───────────
-            # These parse the PDF directly (layout + real tables).
-            pdf_src = src
-            if ext != "pdf":
-                # Wrap a bare image into a one-page PDF so the engine can eat it.
-                pdf_src = str(UPLOAD_DIR / f"{job_id}_wrapped.pdf")
-                with fitz.open(src) as img_doc:
-                    pdf_bytes = img_doc.convert_to_pdf()
-                with fitz.open("pdf", pdf_bytes) as wrapped, open(pdf_src, "wb") as fh:
-                    fh.write(wrapped.tobytes())
-
-            result     = await asyncio.to_thread(extract_document, pdf_src, model)
-            full_text  = result["text"]
-            md_text    = result.get("markdown")
-            tables     = result.get("tables") or []
-            if pdf_src != src:
-                os.unlink(pdf_src)
-            await update_job(job_id, progress=90)
-
-        elif ext == "pdf":
-            doc         = fitz.open(src)
+    elif is_pdf:
+        pages: list[str] = []
+        doc = await asyncio.to_thread(_open_pdf, src)
+        try:
             total_pages = len(doc)
-
             for i, page in enumerate(doc):
-                # ── Table detection ─────────────────────────────
-                tab_result = page.find_tables()
+                tab_result = await asyncio.to_thread(page.find_tables)
                 if tab_result and tab_result.tables:
                     tables.extend(t.extract() for t in tab_result.tables)
 
-                # ── Rasterise page → run OCR ────────────────────
                 tmp_img = UPLOAD_DIR / f"{job_id}_page_{i}.png"
-                page.get_pixmap(dpi=DEFAULT_OCR_DPI).save(str(tmp_img))
-                # Heavy engines block for minutes on CPU — never run them
-                # on the event loop or every other request starves.
-                page_text = await asyncio.to_thread(extract_text, str(tmp_img), model)
-                full_text += page_text + "\n\n"
-                tmp_img.unlink(missing_ok=True)
+                try:
+                    await asyncio.to_thread(lambda: page.get_pixmap(dpi=DEFAULT_OCR_DPI).save(str(tmp_img)))
+                    # Heavy engines block for minutes on CPU — keep them off the event loop.
+                    pages.append(await asyncio.to_thread(extract_text, str(tmp_img), model))
+                finally:
+                    tmp_img.unlink(missing_ok=True)
 
-                progress = 10 + int((i + 1) / total_pages * 80)
-                await update_job(job_id, progress=progress)
-
+                await update_job(job_id, progress=10 + int((i + 1) / total_pages * 80))
+        finally:
             doc.close()
-        else:
-            # Direct image OCR
-            full_text = await asyncio.to_thread(extract_text, src, model)
-            await update_job(job_id, progress=90)
+        full_text = "\n\n".join(pages) + "\n\n" if pages else ""
+    else:
+        full_text = await asyncio.to_thread(extract_text, src, model)
+        await update_job(job_id, progress=90)
 
-        # ── Write outputs ───────────────────────────────────────
-        outputs: list = []
-
-        # Plain text
-        p = res / "out_txt.txt"
-        p.write_text(full_text, encoding="utf-8")
-        outputs.append({"output_id": "out_txt", "format": "txt", "size_bytes": _size(p)})
-
-        # Markdown (engines like docling/marker/qwen provide real markdown)
-        p = res / "out_md.md"
-        p.write_text(f"# OCR Result\n\n{md_text or full_text}", encoding="utf-8")
-        outputs.append({"output_id": "out_md", "format": "md", "size_bytes": _size(p)})
-
-        # Word document
-        p = res / "out_docx.docx"
-        doc_out = Document()
-        doc_out.add_paragraph(full_text)
-        doc_out.save(str(p))
-        outputs.append({"output_id": "out_docx", "format": "docx", "size_bytes": _size(p)})
-
-        # Excel (tables only) — tables may be DataFrames (docling/marker)
-        # or raw row-lists (PyMuPDF detection).
-        if tables:
-            p = res / "out_xlsx.xlsx"
-            with pd.ExcelWriter(str(p)) as writer:
-                for idx, tbl in enumerate(tables):
-                    df = tbl if isinstance(tbl, pd.DataFrame) else pd.DataFrame(tbl)
-                    df.to_excel(
-                        writer, sheet_name=f"Table_{idx + 1}",
-                        index=False, header=False,
-                    )
-            outputs.append({
-                "output_id": "out_xlsx", "format": "xlsx",
-                "label": "Extracted tables", "size_bytes": _size(p),
-            })
-
-        preview = full_text[:2000]
-        await update_job(job_id, status="complete", progress=100,
-                         outputs=outputs, preview_text=preview)
-        log.info("OCR job %s complete (%d output(s))", job_id, len(outputs))
-
-    except Exception as exc:
-        log.exception("OCR job %s failed: %s", job_id, exc)
-        await update_job(job_id, status="error")
+    outputs = await asyncio.to_thread(_write_ocr_outputs, res, full_text, md_text, tables)
+    return outputs, full_text[:2000]
 
 
 # ── PDF → PNG ──────────────────────────────────────────────────────────────────
 
-async def run_pdf_to_png(job_id: str, file_paths: List[str], options: dict) -> None:
-    """Rasterise each page of a PDF to an individual PNG file."""
-    try:
-        await update_job(job_id, status="processing", progress=10)
-
-        src = file_paths[0]
-        dpi = int(options.get("dpi", DEFAULT_EXPORT_DPI))
-        res = _res_dir(job_id)
-
-        doc     = fitz.open(src)
-        outputs = []
-
+def _pdf_to_png(src: str, dpi: int, res: Path) -> list[Output]:
+    outputs: list[Output] = []
+    with _open_pdf(src) as doc:
         for i, page in enumerate(doc):
             out_id = f"out_page_{i + 1}"
-            p      = res / f"{out_id}.png"
+            p = res / f"{out_id}.png"
             page.get_pixmap(dpi=dpi).save(str(p))
-            outputs.append({
-                "output_id": out_id, "format": "png",
-                "label": f"Page {i + 1}", "size_bytes": _size(p),
-            })
+            outputs.append(_output(p, out_id, "png", f"Page {i + 1}"))
+    return outputs
 
-        doc.close()
-        await update_job(job_id, status="complete", progress=100, outputs=outputs)
-        log.info("PDF→PNG job %s complete (%d page(s))", job_id, len(outputs))
 
-    except Exception as exc:
-        log.exception("PDF→PNG job %s failed: %s", job_id, exc)
-        await update_job(job_id, status="error")
+@job_runner
+async def run_pdf_to_png(job_id: str, file_paths: List[str], options: dict) -> RunnerResult:
+    """Rasterise each page of a PDF to an individual PNG file."""
+    outputs = await asyncio.to_thread(_pdf_to_png, file_paths[0], options["dpi"], _res_dir(job_id))
+    return outputs, None
 
 
 # ── PNG → PDF ──────────────────────────────────────────────────────────────────
 
-async def run_png_to_pdf(job_id: str, file_paths: List[str], options: dict) -> None:
-    """Assemble one or more image files into a single PDF document."""
-    try:
-        await update_job(job_id, status="processing", progress=10)
-
-        order   = options.get("page_order", list(range(len(file_paths))))
-        ordered = [file_paths[i] for i in order]
-        res     = _res_dir(job_id)
-
-        doc = fitz.open()
+def _png_to_pdf(ordered: list[str], res: Path) -> list[Output]:
+    out_id = "out_assembled"
+    p = res / f"{out_id}.pdf"
+    with fitz.open() as doc:
         for path in ordered:
-            img_doc  = fitz.open(path)
-            pdf_data = img_doc.convert_to_pdf()
-            img_pdf  = fitz.open("pdf", pdf_data)
-            doc.insert_pdf(img_pdf)
-            img_doc.close()
-            img_pdf.close()
-
-        out_id = "out_assembled"
-        p      = res / f"{out_id}.pdf"
+            with fitz.open(path) as img_doc:
+                pdf_data = img_doc.convert_to_pdf()
+            with fitz.open("pdf", pdf_data) as img_pdf:
+                doc.insert_pdf(img_pdf)
         doc.save(str(p))
-        doc.close()
+    return [_output(p, out_id, "pdf", "assembled_document.pdf")]
 
-        outputs = [{"output_id": out_id, "format": "pdf",
-                    "label": "assembled_document.pdf", "size_bytes": _size(p)}]
-        await update_job(job_id, status="complete", progress=100, outputs=outputs)
-        log.info("PNG→PDF job %s complete", job_id)
 
-    except Exception as exc:
-        log.exception("PNG→PDF job %s failed: %s", job_id, exc)
-        await update_job(job_id, status="error")
+@job_runner
+async def run_png_to_pdf(job_id: str, file_paths: List[str], options: dict) -> RunnerResult:
+    """Assemble one or more image files into a single PDF document."""
+    ordered = [file_paths[i] for i in options["page_order"]]   # validated upstream
+    return await asyncio.to_thread(_png_to_pdf, ordered, _res_dir(job_id)), None
 
 
 # ── Split PDF ──────────────────────────────────────────────────────────────────
 
-async def run_split_pdf(job_id: str, file_paths: List[str], options: dict) -> None:
+def _split_pdf(src: str, ranges: list[list[int]], res: Path) -> list[Output]:
+    outputs: list[Output] = []
+    with _open_pdf(src) as doc:
+        for idx, (start, end) in enumerate(ranges):
+            if end > len(doc):
+                raise ValueError(f"Range {start}-{end} exceeds the document ({len(doc)} pages).")
+            out_id = f"out_range_{idx}"
+            p = res / f"{out_id}.pdf"
+            with fitz.open() as segment:
+                segment.insert_pdf(doc, from_page=start - 1, to_page=end - 1)
+                segment.save(str(p))
+            outputs.append(_output(p, out_id, "pdf", f"pages_{start}–{end}.pdf"))
+    return outputs
+
+
+@job_runner
+async def run_split_pdf(job_id: str, file_paths: List[str], options: dict) -> RunnerResult:
     """
     Extract page ranges from a PDF into separate files.
 
-    `options["ranges"]` should be a list of [start, end] pairs (1-based).
-    Example: [[1, 3], [5, 8]]
+    `options["ranges"]` is a list of [start, end] pairs (1-based), e.g. [[1, 3], [5, 8]].
     """
-    try:
-        await update_job(job_id, status="processing", progress=10)
-
-        src    = file_paths[0]
-        ranges = options.get("ranges", [])
-        res    = _res_dir(job_id)
-
-        doc     = fitz.open(src)
-        outputs = []
-
-        for idx, (start, end) in enumerate(ranges):
-            out_id  = f"out_range_{idx}"
-            p       = res / f"{out_id}.pdf"
-            segment = fitz.open()
-            segment.insert_pdf(doc, from_page=start - 1, to_page=end - 1)
-            segment.save(str(p))
-            segment.close()
-            outputs.append({
-                "output_id": out_id, "format": "pdf",
-                "label": f"pages_{start}–{end}.pdf", "size_bytes": _size(p),
-            })
-
-        doc.close()
-        await update_job(job_id, status="complete", progress=100, outputs=outputs)
-        log.info("Split PDF job %s complete (%d segment(s))", job_id, len(outputs))
-
-    except Exception as exc:
-        log.exception("Split PDF job %s failed: %s", job_id, exc)
-        await update_job(job_id, status="error")
+    outputs = await asyncio.to_thread(_split_pdf, file_paths[0], options["ranges"], _res_dir(job_id))
+    return outputs, None
 
 
 # ── Merge PDF ──────────────────────────────────────────────────────────────────
 
-async def run_merge_pdf(job_id: str, file_paths: List[str], options: dict) -> None:
-    """Merge multiple PDF files into a single document."""
-    try:
-        await update_job(job_id, status="processing", progress=10)
-
-        order   = options.get("file_order", list(range(len(file_paths))))
-        ordered = [file_paths[i] for i in order]
-        res     = _res_dir(job_id)
-
-        merged = fitz.open()
+def _merge_pdf(ordered: list[str], res: Path) -> list[Output]:
+    out_id = "out_merged"
+    p = res / f"{out_id}.pdf"
+    total = 0
+    with fitz.open() as merged:
         for path in ordered:
-            src_doc = fitz.open(path)
-            merged.insert_pdf(src_doc)
-            src_doc.close()
-
-        out_id = "out_merged"
-        p      = res / f"{out_id}.pdf"
+            with _open_pdf(path) as src_doc:
+                total += len(src_doc)
+                if total > MAX_PDF_PAGES:
+                    raise ValueError(f"Merged document would exceed {MAX_PDF_PAGES} pages.")
+                merged.insert_pdf(src_doc)
         merged.save(str(p))
-        merged.close()
+    return [_output(p, out_id, "pdf", "merged_document.pdf")]
 
-        outputs = [{"output_id": out_id, "format": "pdf",
-                    "label": "merged_document.pdf", "size_bytes": _size(p)}]
-        await update_job(job_id, status="complete", progress=100, outputs=outputs)
-        log.info("Merge PDF job %s complete", job_id)
 
-    except Exception as exc:
-        log.exception("Merge PDF job %s failed: %s", job_id, exc)
-        await update_job(job_id, status="error")
+@job_runner
+async def run_merge_pdf(job_id: str, file_paths: List[str], options: dict) -> RunnerResult:
+    """Merge multiple PDF files into a single document."""
+    ordered = [file_paths[i] for i in options["file_order"]]   # validated upstream
+    return await asyncio.to_thread(_merge_pdf, ordered, _res_dir(job_id)), None
 
 
 # ── Dispatcher ─────────────────────────────────────────────────────────────────
